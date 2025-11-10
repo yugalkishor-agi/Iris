@@ -7,7 +7,7 @@
     "icon": "./public/icon.png",
     "userInterfaceStyle": "automatic",
     "splash": {
-      "image": "./public/splash.png",
+      "image": "./public/icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#0D0D0D"
     },
@@ -20,7 +20,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./public/adaptive-icon.png",
+        "foregroundImage": "./public/icon.png",
         "backgroundColor": "#0D0D0D"
       },
       "package": "com.iris.app",
@@ -39,6 +39,9 @@
       "eas": {
         "projectId": "ccf0fc8a-382b-48de-80f6-fd48379e9b64"
       }
-    }
+    },
+    "plugins": [
+      "expo-font"
+    ]
   }
 }
