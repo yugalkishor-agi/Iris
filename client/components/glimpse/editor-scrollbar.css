@@ -1,0 +1,77 @@
+/* Custom scrollbar styling for Glimpses Editor panels */
+
+.glimpse-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.glimpse-scrollbar::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  margin: 2px;
+}
+
+.glimpse-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(135deg, rgba(187, 134, 252, 0.5) 0%, rgba(180, 70, 252, 0.5) 100%);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  transition: all 0.3s ease;
+}
+
+.glimpse-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(135deg, rgba(187, 134, 252, 0.8) 0%, rgba(180, 70, 252, 0.8) 100%);
+  background-clip: content-box;
+}
+
+.glimpse-scrollbar::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Horizontal scrollbar specific styling */
+.glimpse-scrollbar-horizontal {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Vertical scrollbar specific styling */
+.glimpse-scrollbar-vertical {
+  overflow-y: auto;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Smooth scrolling for all scrollable elements */
+.glimpse-smooth-scroll {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Prevent text selection during drag operations */
+.glimpse-no-select {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+/* Hardware acceleration for smoother animations */
+.glimpse-gpu-accelerated {
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+/* Fade effect for scrollable content edges */
+.glimpse-fade-edges {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 5%, black 95%, transparent);
+  mask-image: linear-gradient(to right, transparent, black 5%, black 95%, transparent);
+}
+
+/* Fade effect for vertical scrollable content */
+.glimpse-fade-edges-vertical {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black 5%, black 95%, transparent);
+  mask-image: linear-gradient(to bottom, transparent, black 5%, black 95%, transparent);
+}

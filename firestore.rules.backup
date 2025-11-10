@@ -1,0 +1,218 @@
+crules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+
+    // APP-LEVEL SETTINGS COLLECTION
+    match /settings/{userId} {
+      allow read, write: if isSignedIn() && isOwner(userId);
+    }
+    
+    // USERS COLLECTION
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isOwner(userId);
+      
+      allow update: if isSignedIn() && (
+        isOwner(userId) || 
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stats', 'updatedAt', 'lastActiveAt']) &&
+         request.resource.data.stats.diff(resource.data.stats).affectedKeys().hasOnly(['followersCount', 'followingCount', 'postsCount'])) ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isOnline', 'lastSeen', 'updatedAt'])
+      );
+      
+      allow delete: if isSignedIn() && isOwner(userId);
+      
+      match /followers/{followerId} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn();
+      }
+      
+      match /following/{followingId} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn();
+      }
+      
+      match /blocked/{blockedUserId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+      }
+      
+      match /blockedUsers/{blockedUserId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+      }
+      
+      match /saved/{postId} {
+        allow read: if isSignedIn() && isOwner(userId);
+        allow write: if isSignedIn() && isOwner(userId);
+      }
+      
+      match /messageRequests/{requestId} {
+        allow read: if isSignedIn() && isOwner(userId);
+        allow create: if isSignedIn();
+        allow update, delete: if isSignedIn() && isOwner(userId);
+      }
+
+      match /privacySettings/{docId} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn() && isOwner(userId);
+      }
+
+      match /notificationPreferences/{docId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+      }
+
+      match /mutedUsers/{mutedUserId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+      }
+
+      match /closeFriends/{friendId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+      }
+
+      match /followRequests/{requesterId} {
+        allow read: if isSignedIn() && (isOwner(userId) || request.auth.uid == requesterId);
+        allow create: if isSignedIn();
+        allow delete: if isSignedIn() && (isOwner(userId) || request.auth.uid == requesterId);
+      }
+
+      match /sessions/{sessionId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+      }
+
+      match /dataExports/{exportId} {
+        allow read, create, update, delete: if isSignedIn() && isOwner(userId);
+      }
+      
+      match /contentFilters/{filterId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+      }
+      
+      match /searchHistory/{searchId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+      }
+    }
+    
+    // POSTS COLLECTION
+    match /posts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      
+      allow update: if isSignedIn() && (
+        resource.data.authorId == request.auth.uid ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stats', 'engagement', 'lastEngagementAt']))
+      );
+      
+      allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+      
+      match /likes/{likeId} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn();
+      }
+      
+      match /comments/{commentId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn();
+        allow update, delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+        
+        match /likes/{likeId} {
+          allow read: if isSignedIn();
+          allow write: if isSignedIn();
+        }
+      }
+    }
+    
+    // STORIES COLLECTION
+    match /stories/{storyId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      
+      allow update: if isSignedIn() && (
+        resource.data.authorId == request.auth.uid ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewsCount', 'repliesCount', 'stats']))
+      );
+      
+      allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+      
+      match /likes/{likeId} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn();
+      }
+      
+      match /replies/{replyId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn();
+        allow update, delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+      }
+      
+      match /views/{viewId} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn();
+      }
+    }
+    
+    match /highlights/{highlightId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+    
+    match /conversations/{conversationId} {
+      allow read: if isSignedIn() && request.auth.uid in resource.data.participantIds;
+      allow create: if isSignedIn() && 
+        request.auth.uid in request.resource.data.participantIds &&
+        request.resource.data.participantIds.size() == 2 &&
+        request.resource.data.type in ['direct', 'group'];
+      allow update: if isSignedIn() && request.auth.uid in resource.data.participantIds;
+      allow delete: if isSignedIn() && request.auth.uid in resource.data.participantIds;
+      
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && 
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+        allow create: if isSignedIn() && 
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds &&
+          request.auth.uid == request.resource.data.senderId &&
+          request.resource.data.text != null;
+        allow update: if isSignedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds && (
+            (request.auth.uid != resource.data.senderId &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy', 'status', 'readAt', 'updatedAt'])) ||
+            (request.auth.uid == resource.data.senderId &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isDeleted', 'text', 'deletedBy', 'deletedAt', 'updatedAt']))
+          );
+        allow delete: if false;
+      }
+
+      match /typing/{userId} {
+        allow read: if isSignedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+        allow create, update, delete: if isSignedIn() &&
+          request.auth.uid == userId &&
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+      }
+    }
+    
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+    
+    match /savedCollections/{collectionId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+    
+    match /hashtags/{hashtagId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+  }
+}

@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generate Test Data - Iris</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #0f172a;
+            color: #e2e8f0;
+        }
+        .container {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+        }
+        h1 {
+            color: #06b6d4;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: #94a3b8;
+            margin-bottom: 30px;
+        }
+        button {
+            background: linear-gradient(135deg, #06b6d4, #0891b2);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            display: none;
+        }
+        .status.success {
+            background: #10b98114;
+            border: 1px solid #10b981;
+            color: #10b981;
+            display: block;
+        }
+        .status.error {
+            background: #ef444414;
+            border: 1px solid #ef4444;
+            color: #ef4444;
+            display: block;
+        }
+        .status.info {
+            background: #3b82f614;
+            border: 1px solid #3b82f6;
+            color: #3b82f6;
+            display: block;
+        }
+        .log {
+            background: #0f172a;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            max-height: 300px;
+            overflow-y: auto;
+            display: none;
+        }
+        .log.show {
+            display: block;
+        }
+        .log-line {
+            margin: 5px 0;
+        }
+        .features {
+            margin-top: 30px;
+            padding: 20px;
+            background: #0f172a;
+            border-radius: 8px;
+        }
+        .features h3 {
+            color: #06b6d4;
+            margin-bottom: 15px;
+        }
+        .features ul {
+            list-style: none;
+            padding: 0;
+        }
+        .features li {
+            padding: 8px 0;
+            color: #cbd5e1;
+        }
+        .features li:before {
+            content: "✓ ";
+            color: #10b981;
+            font-weight: bold;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Test Data Generator</h1>
+        <p class="subtitle">Populate your database with sample users, posts, followers, and messages</p>
+        
+        <button id="generateBtn" onclick="generateData()">Generate Test Data</button>
+        
+        <div id="status" class="status"></div>
+        <div id="log" class="log"></div>
+
+        <div class="features">
+            <h3>What will be created:</h3>
+            <ul>
+                <li><strong>5 test users</strong> with avatars, bios, and stats</li>
+                <li><strong>Follow relationships</strong> between you and test users</li>
+                <li><strong>5 test posts</strong> with images and hashtags</li>
+                <li><strong>1 test conversation</strong> with messages</li>
+            </ul>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+        import { getFirestore, collection, doc, setDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+        import { getAuth, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+
+        // Your Firebase config - UPDATE THIS with your config
+        const firebaseConfig = {
+          apiKey: "AIzaSyD9PHBh208uc4lDO9F3lvBUFUotnzGd56k",
+          authDomain: "appmode-a6696.firebaseapp.com",
+          databaseURL: "https://appmode-a6696-default-rtdb.firebaseio.com",
+          projectId: "appmode-a6696",
+          storageBucket: "appmode-a6696.firebasestorage.app",
+          messagingSenderId: "350506689842",
+          appId: "1:350506689842:web:28faec26001e4f1331632b",
+          measurementId: "G-SL94R1QEMC"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        let currentUser = null;
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUser = user;
+                showStatus('info', `Logged in as: ${user.email}`);
+            } else {
+                showStatus('error', '❌ Please login first! Open your app and login, then come back here.');
+                document.getElementById('generateBtn').disabled = true;
+            }
+        });
+
+        function showStatus(type, message) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.className = `status ${type}`;
+            statusDiv.textContent = message;
+        }
+
+        function addLog(message) {
+            const logDiv = document.getElementById('log');
+            logDiv.classList.add('show');
+            const line = document.createElement('div');
+            line.className = 'log-line';
+            line.textContent = message;
+            logDiv.appendChild(line);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        window.generateData = async function() {
+            if (!currentUser) {
+                showStatus('error', '❌ Please login first!');
+                return;
+            }
+
+            const btn = document.getElementById('generateBtn');
+            btn.disabled = true;
+            btn.textContent = 'Generating...';
+            
+            document.getElementById('log').innerHTML = '';
+            addLog('🚀 Starting test data generation...');
+
+            try {
+                // Test users
+                const testUsers = [
+                    { userId: 'test_user_1', username: 'alice_wonder', displayName: 'Alice Wonder', bio: 'Exploring the digital wonderland 🌟', avatarURL: 'https://i.pravatar.cc/150?img=1', stats: { postsCount: 5, followersCount: 120, followingCount: 85 } },
+                    { userId: 'test_user_2', username: 'bob_builder', displayName: 'Bob Builder', bio: 'Building dreams 🏗️', avatarURL: 'https://i.pravatar.cc/150?img=2', verified: true, stats: { postsCount: 8, followersCount: 450, followingCount: 120 } },
+                    { userId: 'test_user_3', username: 'charlie_creative', displayName: 'Charlie Creative', bio: 'Artist & Designer 🎨', avatarURL: 'https://i.pravatar.cc/150?img=3', stats: { postsCount: 12, followersCount: 890, followingCount: 200 } },
+                    { userId: 'test_user_4', username: 'diana_dev', displayName: 'Diana Dev', bio: 'Full-stack developer 💻', avatarURL: 'https://i.pravatar.cc/150?img=4', verified: true, stats: { postsCount: 15, followersCount: 1200, followingCount: 300 } },
+                    { userId: 'test_user_5', username: 'emma_explorer', displayName: 'Emma Explorer', bio: 'Travel blogger ✈️', avatarURL: 'https://i.pravatar.cc/150?img=5', stats: { postsCount: 20, followersCount: 2500, followingCount: 150 } },
+                ];
+
+                addLog('📝 Creating test users...');
+                for (const user of testUsers) {
+                    await setDoc(doc(db, 'users', user.userId), {
+                        ...user,
+                        accountType: 'personal',
+                        isPrivate: false,
+                        isOnline: Math.random() > 0.5,
+                        lastSeen: serverTimestamp(),
+                        createdAt: serverTimestamp(),
+                        updatedAt: serverTimestamp(),
+                    });
+                }
+                addLog('✅ Created 5 test users');
+
+                addLog('👥 Creating follow relationships...');
+                for (const user of testUsers) {
+                    await setDoc(doc(db, `users/${currentUser.uid}/following/${user.userId}`), {
+                        userId: user.userId,
+                        followedAt: serverTimestamp(),
+                    });
+                    await setDoc(doc(db, `users/${user.userId}/followers/${currentUser.uid}`), {
+                        userId: currentUser.uid,
+                        followedAt: serverTimestamp(),
+                    });
+                }
+                addLog('✅ Created follow relationships');
+
+                addLog('📸 Creating test posts...');
+                const testPosts = [
+                    { postId: 'post_1', authorId: 'test_user_1', caption: 'Beautiful sunset 🌅 #sunset #nature', tags: ['sunset', 'nature'], mediaURLs: ['https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=500'] },
+                    { postId: 'post_2', authorId: 'test_user_2', caption: 'Building project! #architecture', tags: ['architecture'], mediaURLs: ['https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=500'] },
+                    { postId: 'post_3', authorId: 'test_user_3', caption: 'Latest artwork 🎨 #art', tags: ['art'], mediaURLs: ['https://images.unsplash.com/photo-1561998338-13ad7883b20f?w=500'] },
+                ];
+
+                for (const post of testPosts) {
+                    await setDoc(doc(db, 'posts', post.postId), {
+                        ...post,
+                        mediaType: 'image',
+                        isPublic: true,
+                        engagement: Math.floor(Math.random() * 1000),
+                        stats: { likesCount: Math.floor(Math.random() * 100), commentsCount: Math.floor(Math.random() * 50) },
+                        createdAt: serverTimestamp(),
+                    });
+                }
+                addLog('✅ Created test posts');
+
+                addLog('💬 Creating test conversation...');
+                const convId = `conv_${currentUser.uid}_test_user_1`;
+                await setDoc(doc(db, 'conversations', convId), {
+                    conversationId: convId,
+                    type: 'direct',
+                    participantIds: [currentUser.uid, 'test_user_1'],
+                    lastMessage: { text: 'Hey! 👋', senderId: 'test_user_1' },
+                    lastMessageAt: serverTimestamp(),
+                    unreadCounts: { [currentUser.uid]: 1 },
+                    createdAt: serverTimestamp(),
+                });
+                addLog('✅ Created conversation');
+
+                addLog('🎉 Test data generation complete!');
+                showStatus('success', '✅ Test data created! Refresh your app to see the data.');
+                
+            } catch (error) {
+                addLog(`❌ Error: ${error.message}`);
+                showStatus('error', `❌ Error: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Generate Test Data';
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "Iris",
+    "slug": "iris-native",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./public/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./public/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0D0D0D"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.iris.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./public/adaptive-icon.png",
+        "backgroundColor": "#0D0D0D"
+      },
+      "package": "com.iris.app",
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "favicon": "./public/favicon.ico",
+      "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "ccf0fc8a-382b-48de-80f6-fd48379e9b64"
+      }
+    }
+  }
+}
