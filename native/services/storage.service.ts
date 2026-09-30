@@ -1,11 +1,10 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 /**
  * Storage Service - Account-Aware Data Management
  * Handles user-specific and shared data with smart caching
  */
 
-// Storage Keys
 const STORAGE_KEYS = {
-  // Shared across all accounts (never cleared)
   SHARED: {
     ACCOUNTS: 'iris_accounts',
     ENCRYPTION_KEY: 'iris_enc_key',
@@ -14,22 +13,18 @@ const STORAGE_KEYS = {
     LANGUAGE: 'iris_language',
     APP_SETTINGS: 'iris_app_settings',
     BIOMETRIC: 'iris_biometric_credentials',
-    PIXABAY_CACHE: 'pixabay-cache-', // prefix
+    PIXABAY_CACHE: 'pixabay-cache-',
   },
-  
-  // User-specific (cleared on account switch)
   USER_SPECIFIC: {
-    SEARCH_HISTORY: 'iris_search_history_', // + userId
-    RECENT_SEARCHES: 'iris_recent_searches_', // + userId
-    DRAFT_POST: 'iris_draft_post_', // + userId
-    DRAFT_GLIMPSE: 'iris_draft_glimpse_', // + userId
-    CACHED_FEED: 'iris_cached_feed_', // + userId
-    CACHED_PROFILE: 'iris_cached_profile_', // + userId
-    VIEWED_STORIES: 'iris_viewed_stories_', // + userId
-    UPLOAD_QUEUE: 'iris_upload_queue_', // + userId
+    SEARCH_HISTORY: 'iris_search_history_',
+    RECENT_SEARCHES: 'iris_recent_searches_',
+    DRAFT_POST: 'iris_draft_post_',
+    DRAFT_GLIMPSE: 'iris_draft_glimpse_',
+    CACHED_FEED: 'iris_cached_feed_',
+    CACHED_PROFILE: 'iris_cached_profile_',
+    VIEWED_STORIES: 'iris_viewed_stories_',
+    UPLOAD_QUEUE: 'iris_upload_queue_',
   },
-  
-  // Temporary (session-based)
   SESSION: {
     SPLASH_SHOWN: 'splashShown',
     QUICK_SWITCH_HINT: 'quickSwitchHintShown',
@@ -37,234 +32,200 @@ const STORAGE_KEYS = {
   }
 };
 
+interface CachedStorageEntry<T> {
+  data: T;
+  timestamp: number;
+  updatedAt: number;
+  expiresAt: number;
+  staleAt?: number;
+  version: number;
+}
+
+const memoryStore = new Map<string, string>();
+
+function memSet(key: string, value: string) {
+  memoryStore.set(key, value);
+  try { void AsyncStorage.setItem(key, value); } catch {}
+}
+
+function memGet(key: string): string | null {
+  if (memoryStore.has(key)) return memoryStore.get(key) || null;
+  try {
+    void AsyncStorage.getItem(key).then((value) => {
+      if (value != null) memoryStore.set(key, value);
+    });
+  } catch {}
+  return null;
+}
+
+function memRemove(keys: string[]) {
+  keys.forEach((key) => memoryStore.delete(key));
+  try { void AsyncStorage.multiRemove(keys); } catch {}
+}
+
+function memClearAll() {
+  memoryStore.clear();
+  try { void AsyncStorage.clear(); } catch {}
+}
+
 export class StorageService {
-  /**
-   * Get user-specific key
-   */
   private getUserKey(baseKey: string, userId: string): string {
     return `${baseKey}${userId}`;
   }
 
-  // ==========================================
-  // USER-SPECIFIC STORAGE
-  // ==========================================
-
-  /**
-   * Set user-specific data
-   */
   setUserData<T>(key: string, userId: string, data: T): void {
-    const userKey = this.getUserKey(key, userId);
-    localStorage.setItem(userKey, JSON.stringify(data));
+    memSet(this.getUserKey(key, userId), JSON.stringify(data));
   }
 
-  /**
-   * Get user-specific data
-   */
   getUserData<T>(key: string, userId: string): T | null {
-    const userKey = this.getUserKey(key, userId);
-    const data = localStorage.getItem(userKey);
-    return data ? JSON.parse(data) : null;
+    const raw = memGet(this.getUserKey(key, userId));
+    return raw ? JSON.parse(raw) : null;
   }
 
-  /**
-   * Clear all data for specific user
-   */
+  deleteUserDataKey(key: string, userId: string): void {
+    memRemove([this.getUserKey(key, userId)]);
+  }
+
   clearUserData(userId: string): void {
+    const suffix = `_${userId}`;
     const keysToRemove: string[] = [];
-    
-    // Find all user-specific keys
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.includes(`_${userId}`)) {
-        keysToRemove.push(key);
-      }
-    }
-    
-    // Remove them
-    keysToRemove.forEach(key => localStorage.removeItem(key));
-    console.log(`🧹 Cleared ${keysToRemove.length} items for user:`, userId);
+    memoryStore.forEach((_, key) => {
+      if (key.endsWith(suffix)) keysToRemove.push(key);
+    });
+    memRemove(keysToRemove);
+    console.log(`Cleared ${keysToRemove.length} items for user:`, userId);
   }
 
-  // ==========================================
-  // SHARED STORAGE (Cached Data)
-  // ==========================================
-
-  /**
-   * Set shared data (persists across accounts)
-   */
   setSharedData<T>(key: string, data: T): void {
-    localStorage.setItem(key, JSON.stringify(data));
+    memSet(key, JSON.stringify(data));
   }
 
-  /**
-   * Get shared data
-   */
   getSharedData<T>(key: string): T | null {
-    const data = localStorage.getItem(key);
-    return data ? JSON.parse(data) : null;
+    const raw = memGet(key);
+    return raw ? JSON.parse(raw) : null;
   }
 
-  // ==========================================
-  // SMART CACHE (With TTL)
-  // ==========================================
-
-  /**
-   * Cache data with expiry time
-   */
   setCachedData<T>(key: string, userId: string, data: T, ttlMinutes: number = 30): void {
-    const cacheEntry = {
+    const now = Date.now();
+    const ttlMs = ttlMinutes * 60 * 1000;
+    const cacheEntry: CachedStorageEntry<T> = {
       data,
-      timestamp: Date.now(),
-      expiresAt: Date.now() + (ttlMinutes * 60 * 1000)
+      timestamp: now,
+      updatedAt: now,
+      expiresAt: now + ttlMs,
+      staleAt: now + Math.max(15 * 1000, ttlMs * 0.5),
+      version: 1,
     };
-    
     this.setUserData(key, userId, cacheEntry);
   }
 
-  /**
-   * Get cached data if not expired
-   */
-  getCachedData<T>(key: string, userId: string): T | null {
-    const cacheEntry = this.getUserData<{
+  getCachedEntry<T>(key: string, userId: string): CachedStorageEntry<T> | null {
+    const cacheEntry = this.getUserData<CachedStorageEntry<T> | {
       data: T;
       timestamp: number;
       expiresAt: number;
     }>(key, userId);
-    
+
     if (!cacheEntry) return null;
-    
-    // Check if expired
-    if (Date.now() > cacheEntry.expiresAt) {
-      this.clearUserData(userId);
+
+    const normalized: CachedStorageEntry<T> = {
+      data: cacheEntry.data,
+      timestamp: cacheEntry.timestamp,
+      updatedAt: (cacheEntry as CachedStorageEntry<T>).updatedAt ?? cacheEntry.timestamp,
+      expiresAt: cacheEntry.expiresAt,
+      staleAt: (cacheEntry as CachedStorageEntry<T>).staleAt,
+      version: (cacheEntry as CachedStorageEntry<T>).version ?? 1,
+    };
+
+    if (Date.now() > normalized.expiresAt) {
+      this.deleteUserDataKey(key, userId);
       return null;
     }
-    
-    return cacheEntry.data;
+
+    return normalized;
   }
 
-  // ==========================================
-  // ACCOUNT SWITCH HANDLER
-  // ==========================================
+  getCachedData<T>(key: string, userId: string): T | null {
+    return this.getCachedEntry<T>(key, userId)?.data ?? null;
+  }
 
-  /**
-   * Prepare for account switch
-   * - Save current user data
-   * - Clear old user cache
-   * - Load new user cache
-   */
+  patchCachedData<T>(
+    key: string,
+    userId: string,
+    updater: (current: T | null) => T | null,
+    ttlMinutes: number = 30
+  ): T | null {
+    const current = this.getCachedEntry<T>(key, userId);
+    const next = updater(current?.data ?? null);
+    if (next === null) {
+      this.deleteUserDataKey(key, userId);
+      return null;
+    }
+    this.setCachedData(key, userId, next, ttlMinutes);
+    return next;
+  }
+
   async handleAccountSwitch(fromUserId: string, toUserId: string): Promise<void> {
-    console.log('🔄 Switching storage from', fromUserId, 'to', toUserId);
-    
-    // 1. Save any pending data for current user
+    console.log('Switching storage from', fromUserId, 'to', toUserId);
     this.savePendingData(fromUserId);
-    
-    // 2. Don't clear - keep for fast switch back
-    // Only clear expired cache
     this.clearExpiredCache(fromUserId);
-    
-    // 3. Pre-load cached data for new user
     this.preloadUserCache(toUserId);
-    
-    console.log('✅ Storage switch complete');
+    console.log('Storage switch complete');
   }
 
-  /**
-   * Save pending drafts, queues etc
-   */
   private savePendingData(userId: string): void {
-    // Already saved through setUserData calls
-    console.log('💾 Pending data already saved for:', userId);
+    console.log('Pending data already saved for:', userId);
   }
 
-  /**
-   * Clear only expired cache
-   */
   private clearExpiredCache(userId: string): void {
     const now = Date.now();
+    const suffix = `_${userId}`;
     const keysToRemove: string[] = [];
-    
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.includes(`_${userId}`)) {
-        try {
-          const data = JSON.parse(localStorage.getItem(key) || '{}');
-          if (data.expiresAt && now > data.expiresAt) {
-            keysToRemove.push(key);
-          }
-        } catch (error) {
-          // Not cached data, skip
-        }
-      }
-    }
-    
-    keysToRemove.forEach(key => localStorage.removeItem(key));
-    if (keysToRemove.length > 0) {
-      console.log(`🗑️ Cleared ${keysToRemove.length} expired items`);
-    }
+    memoryStore.forEach((value, key) => {
+      if (!key.endsWith(suffix)) return;
+      try {
+        const data = JSON.parse(value || '{}');
+        if (data.expiresAt && now > data.expiresAt) keysToRemove.push(key);
+      } catch {}
+    });
+    memRemove(keysToRemove);
+    if (keysToRemove.length > 0) console.log(`Cleared ${keysToRemove.length} expired items`);
   }
 
-  /**
-   * Pre-load cache for fast startup
-   */
   private preloadUserCache(userId: string): void {
-    // Check if user has cached data
     const cachedFeed = this.getCachedData(STORAGE_KEYS.USER_SPECIFIC.CACHED_FEED, userId);
     const cachedProfile = this.getCachedData(STORAGE_KEYS.USER_SPECIFIC.CACHED_PROFILE, userId);
-    
+
     if (cachedFeed || cachedProfile) {
-      console.log('⚡ Pre-loaded cache for fast startup');
+      console.log('Pre-loaded cache for fast startup');
     } else {
-      console.log('📭 No cache found, will load fresh data');
+      console.log('No cache found, will load fresh data');
     }
   }
 
-  // ==========================================
-  // UTILITY METHODS
-  // ==========================================
-
-  /**
-   * Get storage size in MB
-   */
   getStorageSize(): { total: number; perAccount: Record<string, number> } {
     let totalSize = 0;
     const perAccount: Record<string, number> = {};
-    
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key) {
-        const value = localStorage.getItem(key) || '';
-        const size = new Blob([value]).size;
-        totalSize += size;
-        
-        // Track per account
-        const match = key.match(/_([a-zA-Z0-9]+)$/);
-        if (match) {
-          const userId = match[1];
-          perAccount[userId] = (perAccount[userId] || 0) + size;
-        }
+    memoryStore.forEach((value, key) => {
+      const size = new Blob([value]).size;
+      totalSize += size;
+      const match = key.match(/_([a-zA-Z0-9]+)$/);
+      if (match) {
+        const userId = match[1];
+        perAccount[userId] = (perAccount[userId] || 0) + size;
       }
-    }
-    
+    });
     return {
-      total: totalSize / (1024 * 1024), // MB
-      perAccount: Object.fromEntries(
-        Object.entries(perAccount).map(([k, v]) => [k, v / (1024 * 1024)])
-      )
+      total: totalSize / (1024 * 1024),
+      perAccount: Object.fromEntries(Object.entries(perAccount).map(([key, value]) => [key, value / (1024 * 1024)])),
     };
   }
 
-  /**
-   * Clear all app data (logout all)
-   */
   clearAllData(): void {
-    localStorage.clear();
-    sessionStorage.clear();
-    console.log('🧹 All storage cleared');
+    memClearAll();
+    console.log('All storage cleared');
   }
 }
 
-// Export singleton instance
 export const storageService = new StorageService();
-
-// Export keys for direct access
 export { STORAGE_KEYS };

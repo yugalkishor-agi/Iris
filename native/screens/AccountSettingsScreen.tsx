@@ -1,5 +1,4 @@
 import React from 'react';
-import { Alert } from 'react-native';
 import { createSettingsScreen } from '../templates/SettingsTemplate';
 
 const AccountSettingsScreenComponent = createSettingsScreen({
@@ -12,19 +11,13 @@ const AccountSettingsScreenComponent = createSettingsScreen({
           label: 'Email & Phone',
           type: 'navigation',
           icon: 'mail',
-          navigateTo: 'EmailPhoneSettings',
+          navigateTo: 'EmailPhone',
         },
         {
           label: 'Change Password',
           type: 'navigation',
           icon: 'key',
           navigateTo: 'ChangePassword',
-        },
-        {
-          label: 'Two-Factor Authentication',
-          type: 'navigation',
-          icon: 'shield-checkmark',
-          navigateTo: 'TwoFactorAuth',
         },
       ],
     },
@@ -36,6 +29,8 @@ const AccountSettingsScreenComponent = createSettingsScreen({
           type: 'navigation',
           icon: 'download',
           navigateTo: 'DownloadData',
+          badge: 'Coming soon',
+          disabled: true,
         },
         {
           label: 'Storage Usage',
@@ -45,9 +40,9 @@ const AccountSettingsScreenComponent = createSettingsScreen({
         },
         {
           label: 'Clear Cache',
-          type: 'action',
+          type: 'navigation',
           icon: 'trash',
-          onPress: () => Alert.alert('Cache Cleared', 'App cache has been cleared'),
+          navigateTo: 'CacheManagement',
         },
       ],
     },
@@ -74,3 +69,6 @@ const AccountSettingsScreenComponent = createSettingsScreen({
 });
 
 export default AccountSettingsScreenComponent;
+
+
+

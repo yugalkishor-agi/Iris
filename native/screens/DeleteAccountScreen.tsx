@@ -1,83 +1,201 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, TextInput } from 'react-native';
+import { InlineLoadingSkeleton, ButtonLoadingSkeleton } from '../components/ui/LoadingSkeleton';
+import React, { useMemo, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../contexts/AuthContext';
+import { authService } from '../services/auth.service';
+import { userService } from '../services/user.service';
+import { useColors, spacing, typography, borderRadius } from '../styles/theme';
 
 export default function DeleteAccountScreen() {
   const navigation = useNavigation();
-  const { user } = useAuth();
+  const { user, signOut } = useAuth();
+  const themeColors = useColors();
+  const styles = useMemo(() => createStyles(themeColors), [themeColors]);
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleDelete = () => {
-    if (!password) {
-      Alert.alert('Error', 'Please enter your password');
+  const requestDeletion = async () => {
+    if (!user?.userId) return;
+    if (!password.trim()) {
+      Alert.alert('Password Required', 'Please enter your password to continue.');
       return;
     }
+
+    setLoading(true);
+    try {
+      const valid = await authService.verifyPassword(password.trim());
+      if (!valid) {
+        Alert.alert('Invalid Password', 'The password you entered is incorrect.');
+        return;
+      }
+
+      await userService.updateUser(user.userId, {
+        accountStatus: 'deletion_requested',
+        deletionRequested: true,
+        deletionRequestedAt: new Date(),
+      } as any);
+
+      await signOut();
+      Alert.alert(
+        'Deletion Requested',
+        'Your account deletion request has been submitted. Contact support if this was not you.'
+      );
+    } catch (error: any) {
+      Alert.alert('Failed', error?.message || 'Could not process deletion request.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDelete = () => {
     Alert.alert(
       'Delete Account',
-      'This action cannot be undone. All your data will be permanently deleted.',
+      'This starts account deletion workflow. Your data may be removed permanently after processing.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Delete Forever',
+          text: 'Continue',
           style: 'destructive',
-          onPress: async () => {
-            setLoading(true);
-            try {
-              // Call delete service
-              Alert.alert('Deleted', 'Your account has been deleted');
-            } finally {
-              setLoading(false);
-            }
-          },
+          onPress: requestDeletion,
         },
       ]
     );
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={28} color="#000" />
+          <Ionicons name="chevron-back" size={24} color={themeColors.text.primary} />
         </TouchableOpacity>
         <Text style={styles.title}>Delete Account</Text>
-        <View style={{ width: 28 }} />
+        <View style={styles.placeholder} />
       </View>
+
       <ScrollView style={styles.content}>
-        <View style={styles.danger}>
-          <Ionicons name="trash-bin" size={48} color="#ef4444" />
-          <Text style={styles.dangerTitle}>Permanent Deletion</Text>
+        <View style={styles.dangerCard}>
+          <Ionicons name="trash-bin-outline" size={40} color={themeColors.accent.error} />
+          <Text style={styles.dangerTitle}>Permanent Action</Text>
           <Text style={styles.dangerText}>
-            This action is PERMANENT and cannot be undone:{'\n\n'}
-            • All your posts will be deleted{'\n'}
-            • All your messages will be deleted{'\n'}
-            • Your profile will be removed{'\n'}
-            • You cannot recover your account
+            Deletion request removes access to your profile and can permanently erase your account data.
           </Text>
         </View>
-        <Text style={styles.label}>Enter your password to confirm</Text>
-        <TextInput style={styles.input} value={password} onChangeText={setPassword} secureTextEntry placeholder="Password" />
-        <TouchableOpacity style={styles.btn} onPress={handleDelete} disabled={loading}>
-          <Text style={styles.btnText}>{loading ? 'Deleting...' : 'Delete Account Forever'}</Text>
+
+        <Text style={styles.label}>Confirm with your password</Text>
+        <TextInput
+          style={styles.input}
+          value={password}
+          onChangeText={setPassword}
+          secureTextEntry
+          autoCapitalize="none"
+          placeholder="Current password"
+          placeholderTextColor={themeColors.text.secondary}
+        />
+
+        <TouchableOpacity
+          style={[styles.deleteButton, loading && styles.deleteButtonDisabled]}
+          onPress={handleDelete}
+          disabled={loading}
+        >
+          {loading ? <ButtonLoadingSkeleton /> : <Text style={styles.deleteText}>Request Account Deletion</Text>}
         </TouchableOpacity>
       </ScrollView>
-    </View>
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
-  title: { fontSize: 18, fontWeight: '600' },
-  content: { flex: 1, padding: 16 },
-  danger: { backgroundColor: '#fee2e2', padding: 24, borderRadius: 12, alignItems: 'center' },
-  dangerTitle: { fontSize: 20, fontWeight: '700', marginTop: 16, marginBottom: 8, color: '#ef4444' },
-  dangerText: { fontSize: 14, color: '#7f1d1d', textAlign: 'center', lineHeight: 22 },
-  label: { fontSize: 14, fontWeight: '600', marginTop: 24, marginBottom: 8 },
-  input: { borderWidth: 1, borderColor: '#d1d5db', borderRadius: 8, padding: 12, fontSize: 15 },
-  btn: { backgroundColor: '#ef4444', padding: 16, borderRadius: 8, alignItems: 'center', marginTop: 24 },
-  btnText: { color: '#fff', fontWeight: '600', fontSize: 16 },
-});
+const createStyles = (themeColors: ReturnType<typeof useColors>) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: themeColors.background.primary,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.md,
+      borderBottomWidth: 1,
+      borderBottomColor: themeColors.border.subtle,
+    },
+    title: {
+      fontSize: typography.fontSize.lg,
+      fontWeight: typography.fontWeight.semibold as any,
+      color: themeColors.text.primary,
+    },
+    placeholder: {
+      width: 24,
+    },
+    content: {
+      flex: 1,
+      padding: spacing.lg,
+    },
+    dangerCard: {
+      borderWidth: 1,
+      borderColor: `${themeColors.accent.error}55`,
+      backgroundColor: `${themeColors.accent.error}10`,
+      borderRadius: borderRadius.md,
+      padding: spacing.lg,
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    dangerTitle: {
+      fontSize: typography.fontSize.lg,
+      color: themeColors.text.primary,
+      fontWeight: typography.fontWeight.semibold as any,
+    },
+    dangerText: {
+      fontSize: typography.fontSize.sm,
+      color: themeColors.text.secondary,
+      lineHeight: 20,
+      textAlign: 'center',
+    },
+    label: {
+      marginTop: spacing.xl,
+      marginBottom: spacing.xs,
+      color: themeColors.text.secondary,
+      fontSize: typography.fontSize.sm,
+      fontWeight: typography.fontWeight.semibold as any,
+    },
+    input: {
+      borderWidth: 1,
+      borderColor: themeColors.border.light,
+      borderRadius: borderRadius.md,
+      backgroundColor: themeColors.background.secondary,
+      color: themeColors.text.primary,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.md,
+      fontSize: typography.fontSize.base,
+    },
+    deleteButton: {
+      marginTop: spacing.xl,
+      backgroundColor: themeColors.accent.error,
+      borderRadius: borderRadius.md,
+      minHeight: 48,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    deleteButtonDisabled: {
+      opacity: 0.7,
+    },
+    deleteText: {
+      color: '#fff',
+      fontSize: typography.fontSize.base,
+      fontWeight: typography.fontWeight.semibold as any,
+    },
+  });
+
+

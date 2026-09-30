@@ -16,8 +16,10 @@ import {
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 import { userService } from './user.service';
-import { mediaService } from './media.service';
+import { mediaService } from './media.service.native';
 import type { CreateUserData } from '../types/database';
+import { Platform } from 'react-native';
+import { pushService } from './push.service';
 
 export class AuthService {
   // ==========================================
@@ -32,7 +34,7 @@ export class AuthService {
     password: string,
     username: string,
     displayName: string,
-    avatarFile?: File
+    avatarFile?: any
   ): Promise<{ userId: string; user: FirebaseUser }> {
     try {
       // Validate inputs
@@ -41,6 +43,12 @@ export class AuthService {
       }
       if (password.length < 6) {
         throw new Error('Password must be at least 6 characters');
+      }
+
+      // Check username availability (case-insensitive) before creating auth user
+      const available = await userService.isUsernameAvailable(username);
+      if (!available) {
+        throw new Error('Username is already taken');
       }
 
       // 1. Create Firebase Auth user
@@ -98,6 +106,10 @@ export class AuthService {
    */
   async signInWithGoogle(): Promise<{ userId: string; user: FirebaseUser; isNewUser: boolean }> {
     try {
+      if (Platform.OS !== 'web') {
+        throw new Error('Google sign-in is not configured for native builds yet. Use email/password sign in.');
+      }
+
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({
         prompt: 'select_account'
@@ -137,6 +149,9 @@ export class AuthService {
 
       return { userId, user: userCredential.user, isNewUser: !existingUser };
     } catch (error: any) {
+      if (error?.message && !error?.code) {
+        throw error;
+      }
       if (error.code === 'auth/popup-closed-by-user') {
         throw new Error('Sign in cancelled');
       }
@@ -153,8 +168,10 @@ export class AuthService {
       if (currentUser) {
         // Set offline status before signing out
         await userService.setOnlineStatus(currentUser.uid, false);
+        await pushService.unregisterForPushNotifications(currentUser.uid);
       }
 
+      pushService.cleanup();
       await signOut(auth);
     } catch (error: any) {
       throw new Error('Failed to sign out');
@@ -352,7 +369,7 @@ export class AuthService {
   /**
    * Update profile photo
    */
-  async updateProfilePhoto(avatarFile: File): Promise<string> {
+  async updateProfilePhoto(avatarFile: any): Promise<string> {
     try {
       const currentUser = auth.currentUser;
       if (!currentUser) {
@@ -432,3 +449,7 @@ export class AuthService {
 
 // Export singleton instance
 export const authService = new AuthService();
+
+
+
+

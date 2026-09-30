@@ -5,17 +5,18 @@ import type { Post } from '../types/database';
 
 export const useCollections = () => {
   const { user } = useAuth();
+  const currentUserId = user?.userId ?? null;
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!user) return;
+    if (!currentUserId) return;
 
     const loadCollections = async () => {
       try {
         setLoading(true);
-        const data = await collectionService.getUserCollections(user.userId);
+        const data = await collectionService.getUserCollections(currentUserId);
         setCollections(data);
       } catch (err: any) {
         setError(err.message);
@@ -25,7 +26,7 @@ export const useCollections = () => {
     };
 
     loadCollections();
-  }, [user]);
+  }, [currentUserId]);
 
   const createCollection = async (name: string, isPrivate = false) => {
     if (!user) return;
@@ -84,16 +85,17 @@ export const useCollections = () => {
 
 export const useCollectionPosts = (collectionId?: string) => {
   const { user } = useAuth();
+  const currentUserId = user?.userId ?? null;
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!user || !collectionId) return;
+    if (!currentUserId || !collectionId) return;
 
     const loadPosts = async () => {
       try {
         setLoading(true);
-        const data = await collectionService.getCollectionPosts(user.userId, collectionId);
+        const data = await collectionService.getCollectionPosts(currentUserId, collectionId);
         setPosts(data);
       } catch (err) {
         console.error('Failed to load collection posts', err);
@@ -103,23 +105,24 @@ export const useCollectionPosts = (collectionId?: string) => {
     };
 
     loadPosts();
-  }, [user, collectionId]);
+  }, [currentUserId, collectionId]);
 
   return { posts, loading };
 };
 
 export const useSavedPosts = () => {
   const { user } = useAuth();
+  const currentUserId = user?.userId ?? null;
   const [savedPosts, setSavedPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!user) return;
+    if (!currentUserId) return;
 
     const loadSaved = async () => {
       try {
         setLoading(true);
-        const posts = await collectionService.getAllSavedPosts(user.userId);
+        const posts = await collectionService.getAllSavedPosts(currentUserId);
         setSavedPosts(posts);
       } catch (err) {
         console.error('Failed to load saved posts', err);
@@ -129,7 +132,7 @@ export const useSavedPosts = () => {
     };
 
     loadSaved();
-  }, [user]);
+  }, [currentUserId]);
 
   const savePost = async (postId: string, collectionId?: string) => {
     if (!user) return;

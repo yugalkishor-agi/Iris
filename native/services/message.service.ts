@@ -15,93 +15,220 @@ import {
   serverTimestamp,
   writeBatch,
   deleteField,
+  runTransaction,
   DocumentSnapshot,
-} from 'firebase/firestore';
-import { db } from '../config/firebase';
-import type { Conversation, Message, CreateMessageData } from '../types/database';
-import { userService } from './user.service';
+  onSnapshot,
+  arrayUnion,
+  arrayRemove,
+} from "firebase/firestore";
+import { db } from "../config/firebase";
+import { messageCacheService } from "./messageCache.service";
+import { chatE2EE } from './chatE2EE.service';
+import type { Conversation, Message, CreateMessageData } from "../types/database";
+
+type DirectMessageAccess = {
+  allowed: boolean;
+  direct: boolean;
+  requiresRequest: boolean;
+  reason: 'blocked' | 'followers_only' | null;
+};
+
+type ConversationCacheEntry = {
+  data: Conversation;
+  expiresAt: number;
+};
+
+type DirectAccessCacheEntry = {
+  value: DirectMessageAccess;
+  expiresAt: number;
+};
 
 export class MessageService {
+  private static readonly CONVERSATION_CACHE_TTL_MS = 8000;
+  private static readonly DIRECT_ACCESS_CACHE_TTL_MS = 12000;
+
+  private readonly conversationCache = new Map<string, ConversationCacheEntry>();
+  private readonly directAccessCache = new Map<string, DirectAccessCacheEntry>();
+
+  private getDirectAccessCacheKey(senderId: string, recipientId: string): string {
+    return `${senderId}:${recipientId}`;
+  }
+
+  private getCachedConversation(conversationId: string): Conversation | null {
+    const now = Date.now();
+    const cached = this.conversationCache.get(conversationId);
+    if (!cached) return null;
+    if (cached.expiresAt <= now) {
+      this.conversationCache.delete(conversationId);
+      return null;
+    }
+    return cached.data;
+  }
+
+  private cacheConversation(conversationId: string, data: Conversation): void {
+    this.conversationCache.set(conversationId, {
+      data,
+      expiresAt: Date.now() + MessageService.CONVERSATION_CACHE_TTL_MS,
+    });
+  }
+
+  private invalidateConversationCache(conversationId: string): void {
+    this.conversationCache.delete(conversationId);
+  }
+
+  private async getConversationForSend(conversationId: string): Promise<Conversation | null> {
+    const cached = this.getCachedConversation(conversationId);
+    if (cached) return cached;
+
+    const conversationRef = doc(db, "conversations", conversationId);
+    const conversationSnap = await getDoc(conversationRef);
+    if (!conversationSnap.exists()) return null;
+
+    const conversation = { conversationId: conversationSnap.id, ...conversationSnap.data() } as Conversation;
+    this.cacheConversation(conversationId, conversation);
+    return conversation;
+  }
+
+  private async getDirectMessageAccessCached(senderId: string, recipientId: string): Promise<DirectMessageAccess> {
+    const cacheKey = this.getDirectAccessCacheKey(senderId, recipientId);
+    const now = Date.now();
+    const cached = this.directAccessCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.value;
+    }
+
+    const computed = await this.getDirectMessageAccess(senderId, recipientId);
+    this.directAccessCache.set(cacheKey, {
+      value: computed,
+      expiresAt: now + MessageService.DIRECT_ACCESS_CACHE_TTL_MS,
+    });
+
+    return computed;
+  }
   // ==========================================
   // CONVERSATION OPERATIONS
   // ==========================================
+  async setChatTheme(conversationId: string, userId: string, themeKey: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    await updateDoc(conversationRef, {
+      [`chatThemes.${userId}`]: themeKey,
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  async setDisappearingMessages(
+    conversationId: string,
+    userId: string,
+    minutes: number | null
+  ): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    await updateDoc(conversationRef, {
+      [`disappearingBy.${userId}`]: minutes == null ? deleteField() : minutes,
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  /**
+   * Check if two users can message based on privacy, follow state, and blocking.
+   */
+  async getDirectMessageAccess(
+    senderId: string,
+    recipientId: string
+  ): Promise<DirectMessageAccess> {
+    try {
+      const { userService } = await import("./user.service");
+      const { settingsService } = await import("./settings.service");
+
+      const [senderBlockedRecipient, senderFollowsRecipient, recipientFollowsSender, privacy] = await Promise.all([
+        userService.isBlocked(senderId, recipientId),
+        userService.isFollowingUser(senderId, recipientId),
+        userService.isFollowingUser(recipientId, senderId),
+        settingsService.getPrivacySettings(recipientId).catch(() => null),
+      ]);
+
+      if (senderBlockedRecipient) {
+        return { allowed: false, direct: false, requiresRequest: false, reason: 'blocked' };
+      }
+
+      const whoCanMessage = privacy?.whoCanMessage || 'everyone';
+      const allowed = whoCanMessage === 'everyone' || senderFollowsRecipient;
+      const direct = allowed && senderFollowsRecipient && recipientFollowsSender;
+
+      return {
+        allowed,
+        direct,
+        requiresRequest: allowed && !direct,
+        reason: allowed ? null : 'followers_only',
+      };
+    } catch (error) {
+      console.error("Error checking message access:", error);
+      return { allowed: false, direct: false, requiresRequest: false, reason: 'followers_only' };
+    }
+  }
 
   /**
    * Check if two users can message directly (must follow each other)
    * Returns true if they follow each other, false otherwise
    */
   async canMessageDirectly(userId1: string, userId2: string): Promise<boolean> {
-    try {
-      // Import userService dynamically to avoid circular dependency
-      const { userService } = await import('./user.service');
-      
-      // Check if userId1 follows userId2
-      const user1Following = await userService.getFollowing(userId1);
-      const user1FollowsUser2 = user1Following.includes(userId2);
-      
-      // Check if userId2 follows userId1
-      const user2Following = await userService.getFollowing(userId2);
-      const user2FollowsUser1 = user2Following.includes(userId1);
-      
-      // Both must follow each other for direct messaging
-      return user1FollowsUser2 && user2FollowsUser1;
-    } catch (error) {
-      console.error('Error checking if users can message:', error);
-      return false; // Default to not allowing if error
-    }
+    const access = await this.getDirectMessageAccessCached(userId1, userId2);
+    return access.direct;
   }
 
-  /**
-   * Create or get existing direct conversation
-   */
   async getOrCreateDirectConversation(
     userId1: string,
     userId2: string
   ): Promise<string> {
-    // Sort user IDs to ensure consistent ordering
+    const access = await this.getDirectMessageAccessCached(userId1, userId2);
+    if (!access.allowed) {
+      throw new Error(access.reason === 'blocked' ? 'Messaging unavailable for this account.' : 'This user only accepts messages from followers.');
+    }
+
     const sortedIds = [userId1, userId2].sort();
-    
-    // Check if conversation exists - search for both users
-    const conversationsRef = collection(db, 'conversations');
+    const conversationsRef = collection(db, "conversations");
     const q = query(
       conversationsRef,
-      where('type', '==', 'direct'),
-      where('participantIds', 'array-contains', userId1)
+      where("type", "==", "direct"),
+      where("participantIds", "array-contains", userId1)
     );
 
     const snapshot = await getDocs(q);
-    
-    // Find existing conversation with both users
-    const existing = snapshot.docs.find((doc) => {
-      const data = doc.data();
+    const existing = snapshot.docs.find((docSnap) => {
+      const data = docSnap.data();
       const participants = data.participantIds.sort();
-      return participants.length === 2 && 
-             participants[0] === sortedIds[0] && 
-             participants[1] === sortedIds[1];
+      return participants.length === 2 && participants[0] === sortedIds[0] && participants[1] === sortedIds[1];
     });
 
     if (existing) {
-      console.log('Found existing conversation:', existing.id);
+      const existingRef = doc(db, "conversations", existing.id);
+      try {
+        await updateDoc(existingRef, {
+          deletedBy: arrayRemove(userId1),
+          archivedBy: arrayRemove(userId1),
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // no-op: if fields are missing/legacy, conversation can still be reused
+      }
+      this.invalidateConversationCache(existing.id);
       return existing.id;
     }
 
-    // Create new conversation with sorted participant IDs
-    const conversationRef = doc(collection(db, 'conversations'));
+    const conversationRef = doc(collection(db, "conversations"));
     const conversationId = conversationRef.id;
-
-    // Note: Caller is responsible for checking mutual following
-    // We initialize with empty restrictedBy - caller can update if needed
+    const clientTimestamp = Date.now();
     const restrictedBy: string[] = [];
 
     await setDoc(conversationRef, {
       conversationId: conversationRef.id,
-      type: 'direct',
+      type: "direct",
       participantIds: sortedIds,
       participantCount: 2,
       createdBy: userId1,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
       lastMessageAt: serverTimestamp(),
+      lastMessageAtMs: clientTimestamp,
       unreadCounts: {
         [userId1]: 0,
         [userId2]: 0,
@@ -110,152 +237,810 @@ export class MessageService {
       pinnedBy: [],
       mutedBy: [],
       deletedBy: [],
-      restrictedBy, // Auto-restrict if not mutual followers
+      restrictedBy,
     });
 
-    console.log('Created new conversation:', conversationId);
     return conversationId;
   }
 
-  /**
-   * Create group conversation
-   */
   async createGroupConversation(
     creatorId: string,
     participantIds: string[],
     groupName: string,
     groupAvatarURL?: string
   ): Promise<string> {
-    const conversationRef = doc(collection(db, 'conversations'));
-    const conversationId = conversationRef.id;
+    const normalizedParticipantIds = Array.from(
+      new Set((participantIds || []).filter((id) => typeof id === "string" && id.trim().length > 0 && id !== creatorId))
+    );
 
-    const allParticipants = [...new Set([creatorId, ...participantIds])];
+    if (normalizedParticipantIds.length < 2) {
+      throw new Error("A group requires at least 2 members besides the creator.");
+    }
+
+    const conversationRef = doc(collection(db, "conversations"));
+    const conversationId = conversationRef.id;
+    const clientTimestamp = Date.now();
+
+    const allParticipants = [creatorId, ...normalizedParticipantIds];
     const unreadCounts: { [key: string]: number } = {};
     allParticipants.forEach((id) => {
       unreadCounts[id] = 0;
     });
 
-    await setDoc(conversationRef, {
+    const normalizedGroupName = String(groupName || "").trim() || "New group";
+    const normalizedGroupAvatarURL =
+      typeof groupAvatarURL === "string" && groupAvatarURL.trim().length > 0
+        ? groupAvatarURL.trim()
+        : undefined;
+
+    const conversationPayload: Record<string, any> = {
       conversationId,
-      type: 'group',
-      groupName,
-      groupAvatarURL,
+      type: "group",
+      groupName: normalizedGroupName,
       groupAdmins: [creatorId],
+      groupJoinMode: "invite_only",
+      groupJoinRequests: [],
+      groupMemberMutes: {},
+      groupBans: {},
       participantIds: allParticipants,
       participantCount: allParticipants.length,
+      createdBy: creatorId,
       unreadCounts,
+      lastMessage: null,
+      pinnedBy: [],
       mutedBy: [],
+      archivedBy: [],
+      deletedBy: [],
+      restrictedBy: [],
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
       lastMessageAt: serverTimestamp(),
-    });
+      lastMessageAtMs: clientTimestamp,
+    };
+
+    if (normalizedGroupAvatarURL) {
+      conversationPayload.groupAvatarURL = normalizedGroupAvatarURL;
+    }
+
+    await setDoc(conversationRef, conversationPayload);
 
     return conversationId;
   }
 
-  /**
-   * Get conversation by ID
-   */
-  async getConversation(conversationId: string): Promise<Conversation | null> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-
-    if (!conversationSnap.exists()) {
-      return null;
+  async updateGroupConversation(
+    conversationId: string,
+    actorId: string,
+    updates: {
+      groupName?: string;
+      groupDescription?: string | null;
+      groupAvatarURL?: string | null;
+    }
+  ): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
     }
 
-    return { conversationId: conversationSnap.id, ...conversationSnap.data() } as Conversation;
+    const adminIds = Array.isArray(conversation.groupAdmins) ? conversation.groupAdmins : [];
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const canManage = adminIds.includes(actorId) || createdBy === actorId;
+
+    if (!canManage) {
+      throw new Error('Only group admins can update group info.');
+    }
+
+    const patch: Record<string, any> = {
+      updatedAt: serverTimestamp(),
+    };
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'groupName')) {
+      const nextName = String(updates.groupName || '').trim();
+      if (!nextName) {
+        throw new Error('Group name cannot be empty.');
+      }
+      patch.groupName = nextName;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'groupDescription')) {
+      const nextDescription = String(updates.groupDescription || '').trim();
+      patch.groupDescription = nextDescription.length > 0 ? nextDescription : deleteField();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'groupAvatarURL')) {
+      const nextAvatar = String(updates.groupAvatarURL || '').trim();
+      patch.groupAvatarURL = nextAvatar.length > 0 ? nextAvatar : deleteField();
+    }
+
+    await updateDoc(doc(db, 'conversations', conversationId), patch);
+    this.invalidateConversationCache(conversationId);
   }
 
-  /**
-   * Check if conversation is in request mode for a user
-   * Returns true if user has restricted this conversation
-   */
+  async updateGroupSecuritySettings(
+    conversationId: string,
+    actorId: string,
+    updates: {
+      groupJoinMode?: 'invite_only' | 'approval_required';
+    }
+  ): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const adminIds = Array.isArray(conversation.groupAdmins) ? conversation.groupAdmins : [];
+    const createdBy = String((conversation as any)?.createdBy || '');
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can change security settings.');
+    }
+
+    const patch: Record<string, any> = {
+      updatedAt: serverTimestamp(),
+    };
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'groupJoinMode')) {
+      const mode = String(updates.groupJoinMode || '').trim();
+      if (mode !== 'invite_only' && mode !== 'approval_required') {
+        throw new Error('Invalid group join mode.');
+      }
+      patch.groupJoinMode = mode;
+    }
+
+    await updateDoc(doc(db, 'conversations', conversationId), patch);
+    this.invalidateConversationCache(conversationId);
+  }
+  async addGroupMembers(conversationId: string, actorId: string, memberIds: string[]): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+    const adminIds = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    const createdBy = String((conversation as any)?.createdBy || '');
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can add members.');
+    }
+    const existingIds = Array.isArray(conversation.participantIds) ? [...conversation.participantIds] : [];
+    const removedMembers = { ...((conversation as any)?.removedMembers || {}) } as Record<string, { removedBy: string; removedAtMs: number }>;
+    const groupBans = { ...((conversation as any)?.groupBans || {}) } as Record<string, number>;
+    const now = Date.now();
+    const requestedIds = Array.from(new Set((memberIds || []).filter((id) => typeof id === 'string' && id.trim().length > 0)));
+    const blockedIds = requestedIds.filter((id) => Number(groupBans[id] || 0) > now);
+    if (blockedIds.length > 0) {
+      throw new Error('One or more selected members are temporarily banned.');
+    }
+
+    const restoredIds = requestedIds.filter((id) => !!removedMembers[id]);
+    const newMemberIds = requestedIds.filter((id) => !existingIds.includes(id));
+    if (restoredIds.length === 0 && newMemberIds.length === 0) {
+      return;
+    }
+
+    restoredIds.forEach((id) => {
+      delete removedMembers[id];
+    });
+
+    const participantIds = [...existingIds, ...newMemberIds];
+    const unreadCounts = { ...(conversation.unreadCounts || {}) } as Record<string, number>;
+    [...restoredIds, ...newMemberIds].forEach((id) => {
+      unreadCounts[id] = 0;
+    });
+
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      participantIds,
+      participantCount: participantIds.filter((id) => !removedMembers[id]).length,
+      unreadCounts,
+      removedMembers,
+      deletedBy: arrayRemove(...requestedIds),
+      updatedAt: serverTimestamp(),
+    });
+    this.invalidateConversationCache(conversationId);
+
+    const { userService } = await import('./user.service');
+    const addedProfiles = await Promise.all(
+      requestedIds.map(async (id) => {
+        try {
+          return await userService.getUser(id);
+        } catch {
+          return null;
+        }
+      })
+    );
+    const addedLabels = addedProfiles.map((profile, index) => profile?.username || requestedIds[index]).filter(Boolean) as string[];
+    const actor = await this.getActorSnapshot(actorId);
+    await this.sendGroupActivityMessage(
+      conversationId,
+      actorId,
+      actor.username + ' added ' + this.formatGroupUserList(addedLabels) + ' to this group',
+      {
+        participantIds,
+        unreadCounts,
+        removedMembers,
+      }
+    );
+  }
+  async setGroupAdmin(conversationId: string, actorId: string, memberId: string, isAdmin: boolean): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const adminIds = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can manage admins.');
+    }
+    if (!conversation.participantIds?.includes(memberId)) {
+      throw new Error('Member not found in this group.');
+    }
+    const nextAdmins = new Set(adminIds);
+    nextAdmins.add(createdBy);
+    if (memberId === createdBy) {
+      return;
+    }
+    if (isAdmin) {
+      nextAdmins.add(memberId);
+    } else {
+      nextAdmins.delete(memberId);
+    }
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      groupAdmins: Array.from(nextAdmins).filter(Boolean),
+      updatedAt: serverTimestamp(),
+    });
+    this.invalidateConversationCache(conversationId);
+  }
+  async removeGroupMember(conversationId: string, actorId: string, memberId: string): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const adminIds = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can remove members.');
+    }
+    if (memberId === createdBy) {
+      throw new Error('The group owner cannot be removed.');
+    }
+    if (!conversation.participantIds?.includes(memberId)) {
+      return;
+    }
+
+    const participantIds = Array.isArray(conversation.participantIds) ? [...conversation.participantIds] : [];
+    const unreadCounts = { ...(conversation.unreadCounts || {}) } as Record<string, number>;
+    unreadCounts[memberId] = 0;
+    const nextAdmins = adminIds.filter((id) => id !== memberId);
+    const removedMembers = {
+      ...((conversation as any)?.removedMembers || {}),
+      [memberId]: {
+        removedBy: actorId,
+        removedAtMs: Date.now(),
+      },
+    };
+
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      participantIds,
+      participantCount: participantIds.filter((id) => !removedMembers[id]).length,
+      unreadCounts,
+      removedMembers,
+      groupAdmins: Array.from(new Set([createdBy, ...nextAdmins])).filter((id) => participantIds.includes(id) && !removedMembers[id]),
+      deletedBy: arrayRemove(memberId),
+      updatedAt: serverTimestamp(),
+    });
+    this.invalidateConversationCache(conversationId);
+    const removedProfile = await this.getActorSnapshot(memberId);
+    const actor = await this.getActorSnapshot(actorId);
+    await this.sendGroupActivityMessage(
+      conversationId,
+      actorId,
+      actor.username + ' removed ' + removedProfile.username + ' from this group',
+      {
+        participantIds,
+        unreadCounts,
+        removedMembers,
+      }
+    );
+  }
+  async temporarilyBanGroupMember(
+    conversationId: string,
+    actorId: string,
+    memberId: string,
+    durationHours = 24
+  ): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const adminIds = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can ban members.');
+    }
+
+    if (memberId === createdBy) {
+      throw new Error('The group owner cannot be banned.');
+    }
+
+    const participantIds = Array.isArray(conversation.participantIds)
+      ? conversation.participantIds.filter((id) => id !== memberId)
+      : [];
+    const unreadCounts = { ...(conversation.unreadCounts || {}) } as Record<string, number>;
+    delete unreadCounts[memberId];
+    const nextAdmins = adminIds.filter((id) => id !== memberId && participantIds.includes(id));
+    const banUntil = Date.now() + Math.max(1, durationHours) * 60 * 60 * 1000;
+
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      participantIds,
+      participantCount: participantIds.length,
+      unreadCounts,
+      groupAdmins: Array.from(new Set([createdBy, ...nextAdmins])).filter((id) => participantIds.includes(id)),
+      [`groupBans.${memberId}`]: banUntil,
+      deletedBy: arrayUnion(memberId),
+      updatedAt: serverTimestamp(),
+    });
+
+    this.invalidateConversationCache(conversationId);
+  }
+
+  async setGroupMemberMute(
+    conversationId: string,
+    actorId: string,
+    memberId: string,
+    durationMinutes = 60
+  ): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const adminIds = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can mute members.');
+    }
+    if (!conversation.participantIds?.includes(memberId)) {
+      throw new Error('Member not found in this group.');
+    }
+    if (memberId === createdBy) {
+      throw new Error('The group owner cannot be muted.');
+    }
+
+    const mutedUntilMs = Date.now() + Math.max(1, durationMinutes) * 60 * 1000;
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      [`groupMemberMutes.${memberId}`]: {
+        mutedBy: actorId,
+        mutedAtMs: Date.now(),
+        mutedUntilMs,
+      },
+      updatedAt: serverTimestamp(),
+    });
+
+    this.invalidateConversationCache(conversationId);
+    const actor = await this.getActorSnapshot(actorId);
+    const mutedProfile = await this.getActorSnapshot(memberId);
+    await this.sendGroupActivityMessage(
+      conversationId,
+      actorId,
+      actor.username + ' muted ' + mutedProfile.username + ' in this group'
+    );
+  }
+
+  async clearGroupMemberMute(conversationId: string, actorId: string, memberId: string): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const adminIds = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can unmute members.');
+    }
+    const existingMute = ((conversation as any)?.groupMemberMutes || {}) as Record<string, { mutedUntilMs?: number }>;
+    const wasMuted = Number(existingMute[memberId]?.mutedUntilMs || 0) > Date.now();
+
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      [`groupMemberMutes.${memberId}`]: deleteField(),
+      updatedAt: serverTimestamp(),
+    });
+    this.invalidateConversationCache(conversationId);
+    if (wasMuted) {
+      const actor = await this.getActorSnapshot(actorId);
+      const mutedProfile = await this.getActorSnapshot(memberId);
+      await this.sendGroupActivityMessage(
+        conversationId,
+        actorId,
+        actor.username + ' unmuted ' + mutedProfile.username + ' in this group'
+      );
+    }
+  }
+
+  async clearGroupMemberBan(conversationId: string, actorId: string, memberId: string): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const adminIds = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can unban members.');
+    }
+
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      ['groupBans.' + memberId]: deleteField(),
+      updatedAt: serverTimestamp(),
+    });
+    this.invalidateConversationCache(conversationId);
+  }
+  async requestJoinGroup(conversationId: string, userId: string): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const participantIds = Array.isArray(conversation.participantIds) ? conversation.participantIds : [];
+    if (participantIds.includes(userId)) {
+      return;
+    }
+
+    const mode = String((conversation as any)?.groupJoinMode || 'invite_only');
+    if (mode !== 'approval_required') {
+      throw new Error('This group does not accept join requests.');
+    }
+
+    const groupBans = { ...((conversation as any)?.groupBans || {}) } as Record<string, number>;
+    if (Number(groupBans[userId] || 0) > Date.now()) {
+      throw new Error('You are temporarily restricted from joining this group.');
+    }
+
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      groupJoinRequests: arrayUnion(userId),
+      updatedAt: serverTimestamp(),
+    });
+    this.invalidateConversationCache(conversationId);
+  }
+
+  async approveGroupJoinRequest(conversationId: string, actorId: string, memberId: string): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const adminIds = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can approve join requests.');
+    }
+
+    const existingIds = Array.isArray(conversation.participantIds) ? [...conversation.participantIds] : [];
+    const joinRequests = Array.isArray((conversation as any)?.groupJoinRequests)
+      ? [...(conversation as any).groupJoinRequests]
+      : [];
+    if (!joinRequests.includes(memberId) && !existingIds.includes(memberId)) {
+      throw new Error('Join request not found.');
+    }
+    if (existingIds.includes(memberId)) {
+      await updateDoc(doc(db, 'conversations', conversationId), {
+        groupJoinRequests: arrayRemove(memberId),
+        updatedAt: serverTimestamp(),
+      });
+      this.invalidateConversationCache(conversationId);
+      return;
+    }
+
+    const groupBans = { ...((conversation as any)?.groupBans || {}) } as Record<string, number>;
+    if (Number(groupBans[memberId] || 0) > Date.now()) {
+      throw new Error('Member is temporarily banned from this group.');
+    }
+
+    const participantIds = [...existingIds, memberId];
+    const unreadCounts = { ...(conversation.unreadCounts || {}) } as Record<string, number>;
+    unreadCounts[memberId] = 0;
+
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      participantIds,
+      participantCount: participantIds.length,
+      unreadCounts,
+      groupJoinRequests: arrayRemove(memberId),
+      deletedBy: arrayRemove(memberId),
+      updatedAt: serverTimestamp(),
+    });
+    this.invalidateConversationCache(conversationId);
+
+    const actor = await this.getActorSnapshot(actorId);
+    const approvedProfile = await this.getActorSnapshot(memberId);
+    await this.sendGroupActivityMessage(
+      conversationId,
+      actorId,
+      actor.username + ' approved ' + approvedProfile.username + ' to join this group',
+      {
+        participantIds,
+        unreadCounts,
+      }
+    );
+  }
+  async rejectGroupJoinRequest(conversationId: string, actorId: string, memberId: string): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const adminIds = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    if (!(adminIds.includes(actorId) || createdBy === actorId)) {
+      throw new Error('Only group admins can reject join requests.');
+    }
+
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      groupJoinRequests: arrayRemove(memberId),
+      updatedAt: serverTimestamp(),
+    });
+    this.invalidateConversationCache(conversationId);
+  }
+  async leaveGroupConversation(conversationId: string, userId: string): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const existingIds = Array.isArray(conversation.participantIds) ? [...conversation.participantIds] : [];
+    if (!existingIds.includes(userId)) {
+      return;
+    }
+
+    const remainingIds = existingIds.filter((id) => id !== userId);
+    if (remainingIds.length === 0) {
+      throw new Error('Last member cannot leave the group.');
+    }
+
+    const createdBy = String((conversation as any)?.createdBy || '');
+    let nextCreatedBy = createdBy;
+    if (createdBy === userId) {
+      nextCreatedBy = remainingIds[0];
+    }
+
+    const unreadCounts = { ...(conversation.unreadCounts || {}) } as Record<string, number>;
+    delete unreadCounts[userId];
+
+    const currentAdmins = Array.isArray(conversation.groupAdmins) ? [...conversation.groupAdmins] : [];
+    let nextAdmins = currentAdmins.filter((id) => id !== userId && remainingIds.includes(id));
+    if (!nextAdmins.includes(nextCreatedBy)) {
+      nextAdmins = [nextCreatedBy, ...nextAdmins];
+    }
+
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      participantIds: remainingIds,
+      participantCount: remainingIds.length,
+      unreadCounts,
+      groupAdmins: Array.from(new Set(nextAdmins)).filter(Boolean),
+      createdBy: nextCreatedBy,
+      deletedBy: arrayUnion(userId),
+      updatedAt: serverTimestamp(),
+    });
+
+    this.invalidateConversationCache(conversationId);
+    const actor = await this.getActorSnapshot(userId);
+    await this.sendGroupActivityMessage(
+      conversationId,
+      userId,
+      actor.username + ' left this group',
+      {
+        participantIds: remainingIds,
+        unreadCounts,
+      }
+    );
+    await messageCacheService.clear(conversationId, userId).catch(() => undefined);
+  }
+  async deleteGroupConversation(conversationId: string, actorId: string): Promise<void> {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const createdBy = String((conversation as any)?.createdBy || '');
+    const adminIds = Array.isArray(conversation.groupAdmins) ? conversation.groupAdmins : [];
+    const canDelete = createdBy ? createdBy === actorId : adminIds.includes(actorId);
+    if (!canDelete) {
+      throw new Error('Only the group owner can delete this group.');
+    }
+
+    const participantIds = Array.isArray(conversation.participantIds) ? [...conversation.participantIds] : [];
+    await deleteDoc(doc(db, 'conversations', conversationId));
+    this.invalidateConversationCache(conversationId);
+
+    for (const participantId of participantIds) {
+      await messageCacheService.clear(conversationId, participantId).catch(() => undefined);
+    }
+  }
+  async getConversation(conversationId: string): Promise<Conversation | null> {
+    const cached = this.getCachedConversation(conversationId);
+    if (cached) return cached;
+
+    const conversationRef = doc(db, "conversations", conversationId);
+    const conversationSnap = await getDoc(conversationRef);
+    if (!conversationSnap.exists()) return null;
+
+    const conversation = { conversationId: conversationSnap.id, ...conversationSnap.data() } as Conversation;
+    this.cacheConversation(conversationId, conversation);
+    return conversation;
+  }
+
   async isConversationRestricted(conversationId: string, userId: string): Promise<boolean> {
     const conversation = await this.getConversation(conversationId);
     if (!conversation) return false;
-    
     const restrictedBy = conversation.restrictedBy || [];
     return restrictedBy.includes(userId);
   }
 
-  /**
-   * Check if user should see active status for a conversation
-   * Active status is hidden if conversation is in request mode
-   */
   async shouldShowActiveStatus(conversationId: string, userId: string): Promise<boolean> {
     const isRestricted = await this.isConversationRestricted(conversationId, userId);
-    return !isRestricted; // Hide active status if restricted
+    return !isRestricted;
   }
 
-  /**
-   * Mute a conversation for a user (will be replaced by toggle version below)
-   */
-  private async _legacyMuteConversation(conversationId: string, userId: string): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-    
-    if (!conversationSnap.exists()) {
-      throw new Error('Conversation not found');
-    }
+  async unrestrictConversation(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    await updateDoc(conversationRef, {
+      restrictedBy: arrayRemove(userId),
+      updatedAt: serverTimestamp(),
+    });
+  }
 
+  async restrictConversation(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    await updateDoc(conversationRef, {
+      restrictedBy: arrayUnion(userId),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  
+  async archiveConversation(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    await updateDoc(conversationRef, {
+      archivedBy: arrayUnion(userId),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  
+  async unarchiveConversation(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    await updateDoc(conversationRef, {
+      archivedBy: arrayRemove(userId),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  
+  async pinConversation(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    await updateDoc(conversationRef, {
+      pinnedBy: arrayUnion(userId),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  async unpinConversation(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    await updateDoc(conversationRef, {
+      pinnedBy: arrayRemove(userId),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  async muteConversation(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    const snap = await getDoc(conversationRef);
+    if (!snap.exists()) return;
+    const data = snap.data() as any;
+    const mutedBy = data.mutedBy;
+    if (Array.isArray(mutedBy)) {
+      await updateDoc(conversationRef, {
+        mutedBy: arrayUnion(userId),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(conversationRef, {
+        [`mutedBy.${userId}`]: { mutedAt: serverTimestamp(), isMuted: true },
+        updatedAt: serverTimestamp(),
+      });
+    }
+  }
+
+  async unmuteConversation(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    const snap = await getDoc(conversationRef);
+    if (!snap.exists()) return;
+    const data = snap.data() as any;
+    const mutedBy = data.mutedBy;
+    if (Array.isArray(mutedBy)) {
+      await updateDoc(conversationRef, {
+        mutedBy: arrayRemove(userId),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      const nextMutedBy = { ...(mutedBy || {}) };
+      delete nextMutedBy[userId];
+      await updateDoc(conversationRef, {
+        mutedBy: nextMutedBy,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  }
+
+  private async _legacyMuteConversation(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    const conversationSnap = await getDoc(conversationRef);
+    if (!conversationSnap.exists()) {
+      throw new Error("Conversation not found");
+    }
     const data = conversationSnap.data();
     const mutedBy = data.mutedBy || {};
-    
-    mutedBy[userId] = {
-      mutedAt: serverTimestamp(),
-      isMuted: true,
-    };
+    mutedBy[userId] = { mutedAt: serverTimestamp(), isMuted: true };
+    await updateDoc(conversationRef, { mutedBy });
+  }
 
+  
+  async markConversationAsUnread(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
     await updateDoc(conversationRef, {
-      mutedBy,
+      [`unreadCounts.${userId}`]: 1,
+      updatedAt: serverTimestamp(),
     });
   }
 
-  /**
-   * Unmute a conversation for a user
-   */
-  async unmuteConversation(conversationId: string, userId: string): Promise<void> {
-    const convRef = doc(db, 'conversations', conversationId);
-    await updateDoc(convRef, {
-      [`mutedBy.${userId}`]: deleteField()
-    });
-  }
-
-  /**
-   * Get user's conversations
-   */
   async getUserConversations(
     userId: string,
-    limitCount = 50
+    limitCount = 50,
+    lastDoc?: DocumentSnapshot
   ): Promise<Conversation[]> {
-    const conversationsRef = collection(db, 'conversations');
-    const q = query(
+    const conversationsRef = collection(db, "conversations");
+    let q = query(
       conversationsRef,
-      where('participantIds', 'array-contains', userId),
-      orderBy('lastMessageAt', 'desc'),
+      where("participantIds", "array-contains", userId),
+      orderBy("lastMessageAt", "desc"),
       limit(limitCount)
     );
-
+    if (lastDoc) {
+      q = query(q, startAfter(lastDoc));
+    }
     const snapshot = await getDocs(q);
-    
-    // Filter out conversations that user has deleted
-    return snapshot.docs
-      .map((doc) => doc.data() as Conversation)
-      .filter((conv) => {
-        const deletedBy = conv.deletedBy || [];
-        return !deletedBy.includes(userId);
-      });
+    return snapshot.docs.map((docSnap) => docSnap.data() as Conversation);
   }
 
-  /**
-   * Update conversation
-   */
+  async getConversationMessages(
+    conversationId: string,
+    limitCount = 50,
+    lastDoc?: DocumentSnapshot
+  ): Promise<Message[]> {
+    const messagesRef = collection(db, "conversations", conversationId, "messages");
+    let q = query(messagesRef, orderBy("createdAt", "desc"), limit(limitCount));
+    if (lastDoc) {
+      q = query(q, startAfter(lastDoc));
+    }
+    const snapshot = await getDocs(q);
+    const messages = snapshot.docs.map((docSnap) => docSnap.data() as Message);
+    return messages.reverse();
+  }
+
+  subscribeToConversationMessages(
+    conversationId: string,
+    callback: (messages: Message[]) => void,
+    limitCount = 20
+  ): () => void {
+    const messagesRef = collection(db, "conversations", conversationId, "messages");
+    const q = query(messagesRef, orderBy("createdAt", "desc"), limit(limitCount));
+    const unsubscribe = onSnapshot(q, (snapshot: any) => {
+      const messages = snapshot.docs.map((docSnap: any) => docSnap.data() as Message);
+      callback(messages.reverse());
+    });
+    return unsubscribe;
+  }
+
   async updateConversation(
     conversationId: string,
     updates: Partial<Conversation>
   ): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
+    const conversationRef = doc(db, "conversations", conversationId);
     await updateDoc(conversationRef, {
       ...updates,
       updatedAt: serverTimestamp(),
@@ -266,39 +1051,29 @@ export class MessageService {
   // MESSAGE OPERATIONS
   // ==========================================
 
-  /**
-   * Share content (post/glimpse) to a user
-   */
   async shareContent(
     fromUserId: string,
     toUserId: string,
-    contentType: 'post' | 'glimpse',
+    contentType: "post" | "glimpse",
     contentId: string,
     sharedContent: any,
     message?: string
   ): Promise<string> {
-    // Get or create conversation
     const conversationId = await this.getOrCreateDirectConversation(fromUserId, toUserId);
-    
-    // Send message with shared content
     const messageData: CreateMessageData = {
       senderId: fromUserId,
-      senderUsername: sharedContent.username || 'User',
-      text: message || '',
-      type: contentType === 'post' ? 'shared_post' : 'shared_glimpse',
+      senderUsername: sharedContent.username || "User",
+      text: message || "",
+      type: contentType === "post" ? "shared_post" : "shared_glimpse",
       sharedContent: {
         contentId,
         type: contentType,
         ...sharedContent,
       },
     };
-    
     return await this.sendMessage(conversationId, messageData);
   }
 
-  /**
-   * Share story to a user
-   */
   async shareStory(
     conversationId: string,
     fromUserId: string,
@@ -310,807 +1085,832 @@ export class MessageService {
     const messageData: CreateMessageData = {
       senderId: fromUserId,
       senderUsername: storyAuthor,
-      text: '',
-      type: 'shared_story',
+      text: "",
+      type: "shared_story",
       sharedContent: {
         contentId: storyId,
-        type: 'story',
+        type: "story",
         username: storyAuthor,
         coverImage: storyCover,
         verified: authorVerified,
       },
     };
-    
     return await this.sendMessage(conversationId, messageData);
   }
 
-  /**
-   * Send a message
-   */
-  async sendMessage(
-    conversationId: string,
-    messageData: CreateMessageData
+  async forwardMessage(
+    fromConversationId: string,
+    messageId: string,
+    fromUserId: string,
+    toUserId: string
   ): Promise<string> {
-    const batch = writeBatch(db);
+    const sourceMessageRef = doc(db, "conversations", fromConversationId, "messages", messageId);
+    const sourceMessageSnap = await getDoc(sourceMessageRef);
+    if (!sourceMessageSnap.exists()) {
+      throw new Error("Message not found");
+    }
 
-    // Create message
+    const sourceMessage = sourceMessageSnap.data() as Message;
+    const targetConversationId = await this.getOrCreateDirectConversation(fromUserId, toUserId);
+
+    let senderUsername = sourceMessage.senderUsername || "User";
+    let senderAvatarURL = sourceMessage.senderAvatarURL || "";
+
+    try {
+      const { userService } = await import("./user.service");
+      const forwardingUser = await userService.getUser(fromUserId);
+      if (forwardingUser) {
+        senderUsername = forwardingUser.username;
+        senderAvatarURL = forwardingUser.avatarURL || "";
+      }
+    } catch {
+      // Ignore lookup failures and keep fallback values.
+    }
+
+    const forwardedMessage: CreateMessageData = {
+      senderId: fromUserId,
+      senderUsername,
+      senderAvatarURL,
+      text: sourceMessage.text || "",
+      type: sourceMessage.type || (sourceMessage.mediaURL ? "media" : "text"),
+      mediaURL: sourceMessage.mediaURL,
+      mediaType: sourceMessage.mediaType,
+      thumbnailURL: sourceMessage.thumbnailURL,
+      poll: sourceMessage.poll,
+      location: sourceMessage.location,
+      storyReply: sourceMessage.storyReply,
+      sharedContent: sourceMessage.sharedContent,
+      glimpseId: sourceMessage.glimpseId,
+      isForwarded: true,
+      forwardedFrom: {
+        conversationId: fromConversationId,
+        messageId: sourceMessage.messageId,
+        senderId: sourceMessage.senderId,
+        senderUsername: sourceMessage.senderUsername,
+      },
+    };
+
+    return await this.sendMessage(targetConversationId, forwardedMessage);
+  }
+
+  async sendDirectActivityMessage(
+    conversationId: string,
+    actorId: string,
+    text: string
+  ): Promise<void> {
+    const conversation = await this.getConversationForSend(conversationId);
+    if (!conversation || conversation.type !== 'direct') {
+      throw new Error('Direct conversation not found.');
+    }
+
+    const actor = await this.getActorSnapshot(actorId);
+    const participantIds = Array.isArray(conversation.participantIds)
+      ? conversation.participantIds.filter(Boolean)
+      : [];
+    const baseUnreadCounts = { ...(conversation.unreadCounts || {}) } as Record<string, number>;
+    const nextUnreadCounts = { ...baseUnreadCounts };
+
+    participantIds.forEach((participantId) => {
+      nextUnreadCounts[participantId] = participantId === actorId ? 0 : (nextUnreadCounts[participantId] || 0) + 1;
+    });
+
+    const clientTimestamp = Date.now();
     const messageRef = doc(collection(db, `conversations/${conversationId}/messages`));
     const messageId = messageRef.id;
+    const conversationRef = doc(db, 'conversations', conversationId);
+    const readBy = participantIds.includes(actorId) ? [actorId] : [];
+    const messageDoc: Message = {
+      messageId,
+      conversationId,
+      senderId: actorId,
+      senderUsername: actor.username,
+      senderAvatarURL: actor.avatarURL || '',
+      type: 'system',
+      text,
+      status: 'sent',
+      readBy,
+      isEdited: false,
+      isDeleted: false,
+      deletedFor: [],
+      pinnedBy: [],
+      createdAt: serverTimestamp() as any,
+      updatedAt: serverTimestamp() as any,
+      clientCreatedAtMs: clientTimestamp,
+    } as Message;
+
+    const batch = writeBatch(db);
+    batch.set(messageRef, messageDoc as any);
+    batch.update(conversationRef, {
+      lastMessage: {
+        text,
+        senderId: actorId,
+        senderUsername: actor.username,
+        type: 'system',
+        timestamp: serverTimestamp(),
+        clientTimestamp,
+      },
+      lastMessageAt: serverTimestamp(),
+      lastMessageAtMs: clientTimestamp,
+      unreadCounts: nextUnreadCounts,
+      updatedAt: serverTimestamp(),
+      deletedBy: participantIds.length > 0 ? arrayRemove(...participantIds) : [],
+    });
+    await batch.commit();
+    this.invalidateConversationCache(conversationId);
+
+    if (participantIds.includes(actorId)) {
+      const localMessageRecord = {
+        ...messageDoc,
+        createdAt: new Date(clientTimestamp),
+        updatedAt: new Date(clientTimestamp),
+      } as unknown as Message;
+      await messageCacheService.upsertMessages(conversationId, actorId, [localMessageRecord], {
+        limit: 220,
+        ttlMs: 12 * 60 * 60 * 1000,
+      }).catch(() => undefined);
+    }
+  }
+  private async getActorSnapshot(userId: string): Promise<{ username: string; avatarURL: string }> {
+    try {
+      const { userService } = await import('./user.service');
+      const profile = await userService.getUser(userId);
+      return {
+        username: profile?.username || profile?.displayName || 'user',
+        avatarURL: profile?.avatarURL || '',
+      };
+    } catch {
+      return { username: 'user', avatarURL: '' };
+    }
+  }
+  private formatGroupUserList(labels: string[]): string {
+    const clean = Array.from(new Set(labels.map((label) => String(label || '').trim()).filter(Boolean)));
+    if (clean.length === 0) return 'members';
+    if (clean.length === 1) return clean[0];
+    if (clean.length === 2) return clean[0] + ' and ' + clean[1];
+    return clean.slice(0, 2).join(', ') + ' and ' + (clean.length - 2) + ' others';
+  }
+  private extractMentionTokens(text?: string): string[] {
+    if (typeof text !== 'string' || text.trim().length === 0) return [];
+    const matches = text.match(/@(?:everyone|admin|owner|[a-zA-Z0-9._]+)/gi) || [];
+    return Array.from(new Set(matches.map((entry) => entry.slice(1).toLowerCase()).filter(Boolean)));
+  }
+  private async sendGroupActivityMessage(
+    conversationId: string,
+    actorId: string,
+    text: string,
+    options?: {
+      participantIds?: string[];
+      unreadCounts?: Record<string, number>;
+      removedMembers?: Record<string, { removedBy: string; removedAtMs: number }>;
+    }
+  ): Promise<void> {
+    const conversation = await this.getConversationForSend(conversationId);
+    if (!conversation || conversation.type !== 'group') {
+      throw new Error('Group conversation not found.');
+    }
+
+    const actor = await this.getActorSnapshot(actorId);
+    const participantIds = Array.isArray(options?.participantIds)
+      ? options.participantIds.filter(Boolean)
+      : Array.isArray(conversation.participantIds)
+      ? conversation.participantIds.filter(Boolean)
+      : [];
+    const removedMembers = options?.removedMembers || ((conversation as any)?.removedMembers || {});
+    const activeParticipantIds = participantIds.filter((id) => !!id && !removedMembers[id]);
+    const baseUnreadCounts = { ...(options?.unreadCounts || conversation.unreadCounts || {}) } as Record<string, number>;
+    const nextUnreadCounts = { ...baseUnreadCounts };
+
+    activeParticipantIds.forEach((participantId) => {
+      nextUnreadCounts[participantId] = participantId === actorId ? 0 : (nextUnreadCounts[participantId] || 0) + 1;
+    });
+
+    const clientTimestamp = Date.now();
+    const messageRef = doc(collection(db, `conversations/${conversationId}/messages`));
+    const messageId = messageRef.id;
+    const conversationRef = doc(db, 'conversations', conversationId);
+    const readBy = activeParticipantIds.includes(actorId) ? [actorId] : [];
+    const messageDoc: Message = {
+      messageId,
+      conversationId,
+      senderId: actorId,
+      senderUsername: actor.username,
+      senderAvatarURL: actor.avatarURL || '',
+      type: 'group_activity',
+      text,
+      status: 'sent',
+      readBy,
+      isEdited: false,
+      isDeleted: false,
+      deletedFor: [],
+      pinnedBy: [],
+      createdAt: serverTimestamp() as any,
+      updatedAt: serverTimestamp() as any,
+      clientCreatedAtMs: clientTimestamp,
+    } as Message;
+
+    const batch = writeBatch(db);
+    batch.set(messageRef, messageDoc as any);
+
+    const conversationPatch: any = {
+      lastMessage: {
+        text,
+        senderId: actorId,
+        senderUsername: actor.username,
+        type: 'group_activity',
+        timestamp: serverTimestamp(),
+        clientTimestamp,
+      },
+      lastMessageAt: serverTimestamp(),
+      lastMessageAtMs: clientTimestamp,
+      unreadCounts: nextUnreadCounts,
+      updatedAt: serverTimestamp(),
+    };
+
+    if (activeParticipantIds.length > 0) {
+      conversationPatch.deletedBy = arrayRemove(...activeParticipantIds);
+    }
+
+    batch.update(conversationRef, conversationPatch);
+    await batch.commit();
+    this.invalidateConversationCache(conversationId);
+
+    if (activeParticipantIds.includes(actorId)) {
+      const localMessageRecord = {
+        ...messageDoc,
+        createdAt: new Date(clientTimestamp),
+        updatedAt: new Date(clientTimestamp),
+      } as unknown as Message;
+      await messageCacheService.upsertMessages(conversationId, actorId, [localMessageRecord], {
+        limit: 220,
+        ttlMs: 12 * 60 * 60 * 1000,
+      }).catch(() => undefined);
+    }
+  }
+  private async notifyMentionsForGroupMessage(
+    conversation: Conversation,
+    conversationId: string,
+    safeMessageData: CreateMessageData,
+    messagePreview: string
+  ): Promise<void> {
+    const tokens = this.extractMentionTokens(safeMessageData.text);
+    if (tokens.length === 0) return;
+    const senderId = String(safeMessageData.senderId || '');
+    const participantIds = Array.isArray(conversation.participantIds) ? conversation.participantIds.filter(Boolean) : [];
+    if (!senderId || participantIds.length === 0) return;
+    const targetIds = new Set<string>();
+    if (tokens.includes('everyone')) {
+      participantIds.forEach((id) => {
+        if (id !== senderId) targetIds.add(id);
+      });
+    }
+    if (tokens.includes('admin')) {
+      (conversation.groupAdmins || []).forEach((id) => {
+        if (id && id !== senderId) targetIds.add(id);
+      });
+    }
+    if (tokens.includes('owner')) {
+      const ownerId = String((conversation as any)?.createdBy || '');
+      if (ownerId && ownerId !== senderId) targetIds.add(ownerId);
+    }
+    const usernameTokens = tokens.filter((token) => !['everyone', 'admin', 'owner'].includes(token));
+    if (usernameTokens.length > 0) {
+      try {
+        const { userService } = await import('./user.service');
+        const participantProfiles = await Promise.all(
+          participantIds.map(async (participantId) => {
+            try {
+              return await userService.getUser(participantId);
+            } catch {
+              return null;
+            }
+          })
+        );
+        participantProfiles.forEach((profile) => {
+          const username = String(profile?.username || '').toLowerCase();
+          if (!profile?.userId || !username || profile.userId === senderId) return;
+          if (usernameTokens.includes(username)) {
+            targetIds.add(profile.userId);
+          }
+        });
+      } catch (error) {
+        console.error('[Messages] Failed to resolve mention targets', error);
+      }
+    }
+    const finalTargets = Array.from(targetIds).filter((id) => id !== senderId);
+    if (finalTargets.length === 0) return;
+    try {
+      const { notificationService } = await import('./notification.service');
+      await Promise.all(
+        finalTargets.map((recipientId) =>
+          notificationService.notifyMention(
+            recipientId,
+            senderId,
+            safeMessageData.senderUsername,
+            safeMessageData.senderAvatarURL || '',
+            'message',
+            conversationId,
+            messagePreview
+          )
+        )
+      );
+    } catch (error) {
+      console.error('[Messages] Failed to create mention notifications', error);
+    }
+  }
+  async sendMessage(
+    conversationId: string,
+    messageData: CreateMessageData,
+    clientMessageId?: string
+  ): Promise<string> {
+    const batch = writeBatch(db);
+    const messageRef = clientMessageId
+      ? doc(collection(db, `conversations/${conversationId}/messages`), clientMessageId)
+      : doc(collection(db, `conversations/${conversationId}/messages`));
+    const messageId = messageRef.id;
+
+    const safeMessageData = Object.fromEntries(
+      Object.entries(messageData).filter(([, value]) => value !== undefined)
+    ) as CreateMessageData;
+    const safeText = typeof safeMessageData.text === 'string' ? safeMessageData.text : String(safeMessageData.text ?? '');
+    safeMessageData.text = safeText;
+
+    const conversationRef = doc(db, "conversations", conversationId);
+    const conversation = await this.getConversationForSend(conversationId);
+    if (!conversation) {
+      throw new Error("Conversation not found. Please create a conversation first.");
+    }
+    const isFirstMessage = !conversation.lastMessage || conversation.lastMessage === null;
+    let updatedRestrictedBy = conversation.restrictedBy || [];
+    const removedMembers = { ...((conversation as any)?.removedMembers || {}) } as Record<string, { removedBy: string; removedAtMs: number }>;
+    const activeParticipantIds = (conversation.participantIds || []).filter((pid) => !!pid && !removedMembers[pid]);
+
+    if (conversation.type === "direct") {
+      const recipientId = conversation.participantIds.find((id) => id !== messageData.senderId);
+      if (recipientId) {
+        const access = await this.getDirectMessageAccessCached(messageData.senderId, recipientId);
+        if (!access.allowed) {
+          throw new Error(access.reason === 'blocked' ? 'Messaging unavailable for this account.' : 'This user only accepts messages from followers.');
+        }
+        if ((isFirstMessage || access.requiresRequest) && access.requiresRequest && !updatedRestrictedBy.includes(recipientId)) {
+          updatedRestrictedBy = [...updatedRestrictedBy, recipientId];
+        }
+      }
+    } else if (conversation.type === "group") {
+      const senderId = String(messageData.senderId || '');
+      if (!conversation.participantIds?.includes(senderId) || removedMembers[senderId]) {
+        throw new Error('You are no longer a member of this group.');
+      }
+
+      const groupMemberMutes = { ...((conversation as any)?.groupMemberMutes || {}) } as Record<string, { mutedUntilMs?: number }>;
+      const senderMute = groupMemberMutes[senderId];
+      if (Number(senderMute?.mutedUntilMs || 0) > Date.now()) {
+        throw new Error('You are temporarily muted in this group.');
+      }
+    }
+
+    const e2eePrepared = await chatE2EE.prepareOutgoingMessage(conversationId, conversation, safeMessageData);
+    const persistedMessageData = e2eePrepared.messageData;
+    const persistedText = typeof persistedMessageData.text === 'string' ? persistedMessageData.text : '';
 
     const messageDoc: any = {
       messageId,
       conversationId,
-      ...messageData,
-      status: 'sent',
-      readBy: [messageData.senderId],
-      isForwarded: false,
+      ...persistedMessageData,
+      status: "sent",
+      readBy: [persistedMessageData.senderId],
+      isForwarded: Boolean((persistedMessageData as any).isForwarded),
       isEdited: false,
       isDeleted: false,
+      deletedFor: [],
+      pinnedBy: [],
+      clientCreatedAtMs: Date.now(),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
-    
-    // Include replyTo if it exists in messageData
-    if ((messageData as any).replyTo) {
-      messageDoc.replyTo = (messageData as any).replyTo;
+
+    if ((persistedMessageData as any).forwardedFrom) {
+      messageDoc.forwardedFrom = (persistedMessageData as any).forwardedFrom;
     }
-    
+    if ((persistedMessageData as any).replyTo) {
+      messageDoc.replyTo = (persistedMessageData as any).replyTo;
+    }
+
     batch.set(messageRef, messageDoc as Message);
 
-    // Update conversation
-    const conversationRef = doc(db, 'conversations', conversationId);
-    
-    // Get current conversation to update unread counts
-    const conversationSnap = await getDoc(conversationRef);
-    
-    if (!conversationSnap.exists()) {
-      throw new Error('Conversation not found. Please create a conversation first.');
-    }
-    
-    const conversation = conversationSnap.data() as Conversation;
-    
-    // Auto-restrict for recipient on FIRST message if not mutual followers
-    const isFirstMessage = !conversation.lastMessage || conversation.lastMessage === null;
-    let updatedRestrictedBy = conversation.restrictedBy || [];
-    
-    console.log('📨 Message flow:', {
-      conversationId,
-      isFirstMessage,
-      senderId: messageData.senderId,
-      participantIds: conversation.participantIds,
-      existingRestrictedBy: conversation.restrictedBy
-    });
-    
-    if (isFirstMessage && conversation.type === 'direct') {
-      // Get the recipient (other user)
-      const recipientId = conversation.participantIds.find(id => id !== messageData.senderId);
-      
-      console.log('🎯 Checking restriction:', {
-        senderId: messageData.senderId,
-        recipientId,
-        participantIds: conversation.participantIds
-      });
-      
-      if (recipientId) {
-        // Check if they can message directly (mutual followers)
-        const canMessage = await this.canMessageDirectly(messageData.senderId, recipientId);
-        
-        console.log('✅ Can message check:', {
-          senderId: messageData.senderId,
-          recipientId,
-          canMessage,
-          alreadyRestricted: updatedRestrictedBy.includes(recipientId)
-        });
-        
-        // If not mutual followers, restrict for recipient ONLY
-        if (!canMessage && !updatedRestrictedBy.includes(recipientId)) {
-          // CRITICAL: Only add recipientId, NOT senderId!
-          if (recipientId === messageData.senderId) {
-            console.error('🚨 ERROR: Trying to restrict sender! This should NEVER happen!');
-            console.error('   → senderId:', messageData.senderId);
-            console.error('   → recipientId:', recipientId);
-            console.error('   → participantIds:', conversation.participantIds);
-          } else {
-            updatedRestrictedBy = [...updatedRestrictedBy, recipientId];
-            console.log(`🔒 Auto-restricting conversation ${conversationId}`);
-            console.log(`   → Sender: ${messageData.senderId} (NOT restricted)`);
-            console.log(`   → Recipient: ${recipientId} (RESTRICTED)`);
-            console.log(`   → restrictedBy: [${updatedRestrictedBy.join(', ')}]`);
-            console.log(`   ✅ VERIFIED: Sender NOT in restrictedBy`);
-          }
-        } else if (canMessage) {
-          console.log('✅ Mutual followers - No restriction needed');
-        }
-      }
-    }
-    
-    // Reactivate conversation for any deleted participants (REMOVE sender from deletedBy)
-    const deletedBy = conversation.deletedBy || [];
-    const updatedDeletedBy = deletedBy.filter((id: string) => id !== messageData.senderId);
-    
-    const newUnreadCounts: { [key: string]: number } = {};
-    conversation.participantIds.forEach((participantId) => {
-      if (participantId === messageData.senderId) {
-        newUnreadCounts[participantId] = 0;
-      } else {
-        newUnreadCounts[participantId] = (conversation.unreadCounts?.[participantId] || 0) + 1;
-      }
+    const unreadCounts = { ...(conversation.unreadCounts || {}) };
+
+    const clientTimestamp = Date.now();
+    activeParticipantIds.forEach((pid) => {
+      unreadCounts[pid] = pid === messageData.senderId ? 0 : (unreadCounts[pid] || 0) + 1;
     });
 
-    const lastMessageUpdate: any = {
-      text: messageData.text || '',
-      senderId: messageData.senderId,
-      senderUsername: messageData.senderUsername,
+    const previewText = e2eePrepared.enabled ? 'Encrypted message' : persistedText || '';
+    const lastMessage: any = {
+      text: previewText,
+      senderId: persistedMessageData.senderId,
       timestamp: serverTimestamp(),
+      clientTimestamp,
     };
-    
-    // Only add mediaType if it exists
-    if (messageData.mediaType) {
-      lastMessageUpdate.mediaType = messageData.mediaType;
+    if ((persistedMessageData as any).mediaType) {
+      lastMessage.mediaType = (persistedMessageData as any).mediaType;
     }
-    
-    const conversationUpdate: any = {
-      lastMessage: lastMessageUpdate,
-      unreadCounts: newUnreadCounts,
-      deletedBy: updatedDeletedBy,
+    if ((persistedMessageData as any).type) {
+      lastMessage.type = (persistedMessageData as any).type;
+    }
+
+    const conversationPatch: any = {
+      lastMessage: lastMessage,
       lastMessageAt: serverTimestamp(),
+      lastMessageAtMs: clientTimestamp,
+      unreadCounts,
+      restrictedBy: updatedRestrictedBy,
       updatedAt: serverTimestamp(),
     };
-    
-    // Add restrictedBy if it changed
-    if (updatedRestrictedBy.length !== (conversation.restrictedBy || []).length) {
-      conversationUpdate.restrictedBy = updatedRestrictedBy;
+
+    if (e2eePrepared.conversationE2EE) {
+      conversationPatch.e2ee = e2eePrepared.conversationE2EE;
     }
-    
-    batch.update(conversationRef, conversationUpdate);
+
+    if (activeParticipantIds.length > 0) {
+      conversationPatch.deletedBy = arrayRemove(...activeParticipantIds);
+    }
+
+    batch.update(conversationRef, conversationPatch);
 
     await batch.commit();
-    
-    // Send DM notification to recipients (fire and forget)
-    this.notifyMessageRecipients(conversationId, messageData, conversation);
-    
+
+    const cachedNextConversation = {
+      ...conversation,
+      unreadCounts,
+      restrictedBy: updatedRestrictedBy,
+      removedMembers,
+      deletedBy: [],
+      e2ee: e2eePrepared.conversationE2EE || (conversation as any).e2ee,
+      lastMessage: {
+        text: previewText,
+        senderId: persistedMessageData.senderId,
+        senderUsername: persistedMessageData.senderUsername || (conversation.lastMessage as any)?.senderUsername || "",
+        type: (persistedMessageData as any).type || undefined,
+        mediaType: (persistedMessageData as any).mediaType || undefined,
+        timestamp: (conversation.lastMessage as any)?.timestamp || (new Date() as any),
+      },
+      lastMessageAtMs: clientTimestamp,
+    } as Conversation;
+    this.cacheConversation(conversationId, cachedNextConversation);
+    chatE2EE.invalidateConversation(conversationId);
+
+    const localMessageRecord = {
+      ...messageDoc,
+      messageId,
+      text: safeText,
+      replyToText: safeMessageData.replyToText,
+      replyTo: (safeMessageData as any).replyTo,
+      forwardedFrom: safeMessageData.forwardedFrom,
+      e2eeState: e2eePrepared.enabled ? 'decrypted' : (messageDoc.e2eeState || undefined),
+      status: 'sent',
+      createdAt: new Date(clientTimestamp),
+      updatedAt: new Date(clientTimestamp),
+      clientCreatedAtMs: clientTimestamp,
+    } as Message;
+    await messageCacheService.upsertMessages(conversationId, persistedMessageData.senderId, [localMessageRecord], {
+      limit: 220,
+      ttlMs: 12 * 60 * 60 * 1000,
+    }).catch(() => undefined);
+
+    const messagePreview =
+      e2eePrepared.previewText ||
+      safeText.trim() ||
+      ((persistedMessageData as any).type === "shared_post"
+        ? "Shared a post"
+        : (persistedMessageData as any).type === "shared_glimpse"
+        ? "Shared a glimpse"
+        : (persistedMessageData as any).type === "shared_story"
+        ? "Shared a story"
+        : (persistedMessageData as any).type === "story_reply"
+        ? "Replied to your story"
+        : (persistedMessageData as any).type === "glimpse_collab_request"
+        ? "Sent a glimpse collaboration request"
+        : (persistedMessageData as any).mediaType === "video"
+        ? "Sent a video"
+        : (persistedMessageData as any).mediaType === "audio"
+        ? "Sent a voice message"
+        : (persistedMessageData as any).mediaType === "image"
+        ? "Sent a photo"
+        : (persistedMessageData as any).type === "location"
+        ? "Shared a location"
+        : (persistedMessageData as any).type === "poll"
+        ? "Sent a poll"
+        : "Sent you a message");
+
+    const recipientIds = activeParticipantIds.filter((pid) => pid !== messageData.senderId);
+    if (conversation.type === 'group') {
+      void this.notifyMentionsForGroupMessage({ ...conversation, participantIds: activeParticipantIds } as Conversation, conversationId, safeMessageData, messagePreview);
+    }
+    if (recipientIds.length > 0) {
+      void import("./notification.service")
+        .then(({ notificationService }) =>
+          Promise.all(
+            recipientIds.map((recipientId) =>
+              notificationService.notifyDM(
+                recipientId,
+                messageData.senderId,
+                messageData.senderUsername,
+                messageData.senderAvatarURL || "",
+                conversationId,
+                messagePreview
+              )
+            )
+          )
+        )
+        .catch((error) => {
+          console.error("[Messages] Failed to create DM notification", error);
+        });
+    }
+
     return messageId;
   }
 
-  /**
-   * Send DM notifications to recipients (async, non-blocking)
-   */
-  private async notifyMessageRecipients(
+  async markMessagesDelivered(
     conversationId: string,
-    messageData: CreateMessageData,
-    conversation: Conversation
+    userId: string,
+    messages: Message[]
   ): Promise<void> {
-    try {
-      const { userService } = await import('./user.service');
-      const sender = await userService.getUser(messageData.senderId);
-      if (!sender) return;
-
-      const { notificationService } = await import('./notification.service');
-      
-      // Notify all participants except sender
-      const recipients = conversation.participantIds.filter(id => id !== messageData.senderId);
-      
-      for (const recipientId of recipients) {
-        await notificationService.notifyDM(
-          recipientId,
-          messageData.senderId,
-          sender.username,
-          sender.avatarURL || '',
-          conversationId,
-          messageData.text || 'Sent a photo'
-        );
-      }
-    } catch (error) {
-      console.error('DM notification failed:', error);
-    }
-  }
-
-  /**
-   * Get messages (paginated)
-   */
-  async getMessages(
-    conversationId: string,
-    limitCount = 50,
-    lastDoc?: DocumentSnapshot
-  ): Promise<{ messages: Message[]; lastDoc: DocumentSnapshot | null }> {
-    const messagesRef = collection(db, `conversations/${conversationId}/messages`);
-    let q = query(
-      messagesRef,
-      orderBy('createdAt', 'desc'),
-      limit(limitCount)
+    const uniqueMessages = Array.from(
+      new Map(
+        messages
+          .filter((msg) => msg?.messageId && msg.senderId !== userId)
+          .map((msg) => [msg.messageId, msg])
+      ).values()
     );
 
-    if (lastDoc) {
-      q = query(q, startAfter(lastDoc));
-    }
+    if (uniqueMessages.length === 0) return;
 
-    const snapshot = await getDocs(q);
-
-    return {
-      messages: snapshot.docs.map((doc) => doc.data() as Message),
-      lastDoc: snapshot.docs[snapshot.docs.length - 1] || null,
-    };
-  }
-
-  /**
-   * Mark message as read
-   * Note: Does NOT mark as read if conversation is in request mode for this user
-   */
-  async markMessageAsRead(
-    conversationId: string,
-    messageId: string,
-    userId: string
-  ): Promise<void> {
-    // Check if conversation is in request mode for this user
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-    
-    if (conversationSnap.exists()) {
-      const restrictedBy = conversationSnap.data().restrictedBy || [];
-      
-      // If user has restricted this conversation (moved to requests),
-      // don't mark messages as read (sender won't see "seen")
-      if (restrictedBy.includes(userId)) {
-        return; // Skip marking as read
-      }
-    }
-    
-    const messageRef = doc(db, `conversations/${conversationId}/messages/${messageId}`);
-    const messageDoc = await getDoc(messageRef);
-    
-    if (messageDoc.exists()) {
-      const currentReadBy = messageDoc.data().readBy || [];
-      await updateDoc(messageRef, {
-        readBy: [...new Set([...currentReadBy, userId])], // Add userId to existing readBy array
-        status: 'read',
-        readAt: serverTimestamp(),
-      });
-    }
-  }
-
-  /**
-   * Mark all conversation messages as read
-   * Note: Does NOT mark as read if conversation is in request mode for this user
-   */
-  async markConversationAsRead(conversationId: string, userId: string): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    
-    // Get current conversation
-    const conversationSnap = await getDoc(conversationRef);
-    const conversation = conversationSnap.data() as Conversation;
-    
-    // Check if conversation is in request mode for this user
-    const restrictedBy = conversation.restrictedBy || [];
-    if (restrictedBy.includes(userId)) {
-      // User has restricted this conversation (moved to requests)
-      // Don't mark messages as read (sender won't see "seen")
-      // But still clear unread count for user's UI
-      const newUnreadCounts = { ...conversation.unreadCounts };
-      newUnreadCounts[userId] = 0;
-      
-      await updateDoc(conversationRef, {
-        unreadCounts: newUnreadCounts,
-      });
-      return; // Skip marking messages as read
-    }
-    
-    // Update unread count for this user
-    const newUnreadCounts = { ...conversation.unreadCounts };
-    newUnreadCounts[userId] = 0;
-    
-    await updateDoc(conversationRef, {
-      unreadCounts: newUnreadCounts,
-    });
-
-    // Mark all unread messages as read
-    const messagesRef = collection(db, `conversations/${conversationId}/messages`);
-    const q = query(messagesRef, where('senderId', '!=', userId));
-    const snapshot = await getDocs(q);
-    
     const batch = writeBatch(db);
-    snapshot.docs.forEach((doc) => {
-      const message = doc.data() as Message;
-      const currentReadBy = message.readBy || [];
-      
-      // Only update if user hasn't read it yet
-      if (!currentReadBy.includes(userId)) {
-        batch.update(doc.ref, {
-          readBy: [...new Set([...currentReadBy, userId])],
-          status: 'read',
+    uniqueMessages.forEach((msg) => {
+      const msgRef = doc(db, `conversations/${conversationId}/messages`, msg.messageId);
+      batch.update(msgRef, {
+        deliveredAt: serverTimestamp(),
+      });
+    });
+      await batch.commit();
+      this.invalidateConversationCache(conversationId);
+  }
+
+  async markMessagesRead(conversationId: string, userId: string, messageIds?: string[]): Promise<void> {
+    const explicitIds = Array.isArray(messageIds)
+      ? Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id.trim().length > 0)))
+      : [];
+
+    if (explicitIds.length > 0) {
+      const batch = writeBatch(db);
+      explicitIds.forEach((messageId) => {
+        const msgRef = doc(db, `conversations/${conversationId}/messages`, messageId);
+        batch.update(msgRef, {
+          readBy: arrayUnion(userId),
+          deliveredAt: serverTimestamp(),
           readAt: serverTimestamp(),
         });
-      }
+      });
+      await batch.commit();
+      this.invalidateConversationCache(conversationId);
+      return;
+    }
+
+    const messagesRef = collection(db, "conversations", conversationId, "messages");
+    const recentQuery = query(messagesRef, orderBy("createdAt", "desc"), limit(25));
+    const snapshot = await getDocs(recentQuery);
+
+    const unreadIncoming = snapshot.docs.filter((docSnap) => {
+      const data = docSnap.data() as Message;
+      if (data.senderId === userId) return false;
+      return !Array.isArray(data.readBy) || !data.readBy.includes(userId);
     });
-    
+
+    if (unreadIncoming.length === 0) {
+      return;
+    }
+
+    const batch = writeBatch(db);
+    unreadIncoming.forEach((docSnap) => {
+      const data = docSnap.data() as Message;
+      batch.update(docSnap.ref, {
+        readBy: arrayUnion(userId),
+        deliveredAt: data.deliveredAt || serverTimestamp(),
+        readAt: serverTimestamp(),
+      });
+    });
+
     await batch.commit();
+    this.invalidateConversationCache(conversationId);
   }
 
-  /**
-   * Delete message (soft delete for current user)
-   */
-  async deleteMessage(
+  async markConversationAsRead(conversationId: string, userId: string): Promise<void> {
+    const conversationRef = doc(db, "conversations", conversationId);
+    await updateDoc(conversationRef, {
+      [`unreadCounts.${userId}`]: 0,
+    });
+    this.invalidateConversationCache(conversationId);
+  }
+
+  async markMessagesAsDeleted(
+    conversationId: string,
+    userId: string,
+    messageIds: string[]
+  ): Promise<void> {
+    const batch = writeBatch(db);
+    messageIds.forEach((mid) => {
+      const msgRef = doc(db, `conversations/${conversationId}/messages`, mid);
+      batch.update(msgRef, {
+        deletedFor: arrayUnion(userId),
+        updatedAt: serverTimestamp(),
+      });
+    });
+    await batch.commit();
+    this.invalidateConversationCache(conversationId);
+  }
+
+  async pinMessage(conversationId: string, userId: string, messageId: string): Promise<void> {
+    const convRef = doc(db, "conversations", conversationId);
+    await updateDoc(convRef, {
+      [`pinnedMessageIdsBy.${userId}`]: increment(0),
+    });
+    const pinRef = doc(db, `conversations/${conversationId}/pinned`, messageId);
+    await setDoc(pinRef, { messageId, pinnedBy: userId, createdAt: serverTimestamp() });
+  }
+
+  async voteInPoll(
     conversationId: string,
     messageId: string,
+    optionId: string,
     userId: string
   ): Promise<void> {
-    const messageRef = doc(db, `conversations/${conversationId}/messages/${messageId}`);
-    const msgSnap = await getDoc(messageRef);
-    
-    if (!msgSnap.exists()) return;
-    
+    const msgRef = doc(db, `conversations/${conversationId}/messages`, messageId);
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(msgRef);
+      if (!snap.exists()) return;
+
+      const data: any = snap.data();
+      const poll = data.poll;
+      if (!poll || !Array.isArray(poll.options)) return;
+
+      const options = [...poll.options];
+      const idx = options.findIndex((opt: any) => opt.id === optionId);
+      if (idx < 0) return;
+
+      const target = options[idx];
+      const voterIds = Array.isArray(target.voterIds) ? target.voterIds : [];
+      if (voterIds.includes(userId)) return;
+
+      options[idx] = {
+        ...target,
+        votes: (target.votes || 0) + 1,
+        voterIds: [...voterIds, userId],
+      };
+
+      tx.update(msgRef, {
+        poll: {
+          ...poll,
+          options,
+          totalVotes: (poll.totalVotes || 0) + 1,
+        },
+        updatedAt: serverTimestamp(),
+      });
+    });
+  }
+
+  async unsendMessage(conversationId: string, messageId: string, userId: string): Promise<void> {
+    const messageRef = doc(db, `conversations/${conversationId}/messages`, messageId);
+    const messageSnap = await getDoc(messageRef);
+    if (!messageSnap.exists()) return;
+
+    const messageData = messageSnap.data() as any;
+    if (messageData?.senderId !== userId) {
+      throw new Error('Only the sender can delete this message for everyone.');
+    }
+
     await updateDoc(messageRef, {
+      text: 'This message was unsent',
+      type: 'text',
+      mediaURL: deleteField(),
+      mediaType: deleteField(),
+      mediaUrl: deleteField(),
+      url: deleteField(),
+      imageUrl: deleteField(),
+      gif: deleteField(),
+      sticker: deleteField(),
+      sharedContent: deleteField(),
+      sharedPostId: deleteField(),
+      sharedGlimpseId: deleteField(),
+      sharedStoryId: deleteField(),
+      poll: deleteField(),
+      location: deleteField(),
       isDeleted: true,
-      text: 'This message was deleted',
-      deletedBy: userId,
       deletedAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
   }
-
-  /**
-   * Unsend message (hard delete for ALL users - removes message completely)
-   */
-  async unsendMessage(
-    conversationId: string,
-    messageId: string,
-    senderId: string
-  ): Promise<void> {
-    const messageRef = doc(db, `conversations/${conversationId}/messages/${messageId}`);
-    const msgSnap = await getDoc(messageRef);
-    
-    if (!msgSnap.exists()) return;
-    
-    const message = msgSnap.data() as Message;
-    
-    // Only sender can unsend their own message
-    if (message.senderId !== senderId) {
-      throw new Error('You can only unsend your own messages');
-    }
-    
-    // Permanently delete message
-    await deleteDoc(messageRef);
-  }
-
-  /**
-   * Set typing indicator for user in conversation
-   */
-  async setTyping(
-    conversationId: string,
-    userId: string,
-    isTyping: boolean
-  ): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const typingField = `typing.${userId}`;
-    
-    await updateDoc(conversationRef, {
-      [typingField]: isTyping ? serverTimestamp() : null,
-    });
-  }
-
-  /**
-   * Add reaction to message
-   */
-  async addReaction(
-    conversationId: string,
-    messageId: string,
-    userId: string,
-    emoji: string
-  ): Promise<void> {
-    const messageRef = doc(db, `conversations/${conversationId}/messages/${messageId}`);
-    await updateDoc(messageRef, {
-      [`reactions.${userId}`]: emoji,
-      updatedAt: serverTimestamp(),
-    });
-  }
-
-  /**
-   * Remove reaction from message
-   */
-  async removeReaction(
-    conversationId: string,
-    messageId: string,
-    userId: string
-  ): Promise<void> {
-    const messageRef = doc(db, `conversations/${conversationId}/messages/${messageId}`);
-    await updateDoc(messageRef, {
-      [`reactions.${userId}`]: deleteField(),
-    });
-  }
-
-  /**
-   * Forward single message to another user
-   */
-  async forwardMessage(
-    conversationId: string,
-    messageId: string,
-    fromUserId: string,
-    toUserId: string
-  ): Promise<void> {
-    const messageRef = doc(db, 'conversations', conversationId, 'messages', messageId);
-    const messageSnap = await getDoc(messageRef);
-    
-    if (!messageSnap.exists()) {
-      throw new Error('Message not found');
-    }
-
-    const originalMessage = messageSnap.data() as Message;
-    const newConversationId = await this.getOrCreateDirectConversation(fromUserId, toUserId);
-
-    // Map message type, converting 'media' to 'text' for CreateMessageData
-    const messageType = originalMessage.type === 'media' ? 'text' : (originalMessage.type || 'text');
-
-    const forwardedMessageData: CreateMessageData = {
-      senderId: fromUserId,
-      senderUsername: originalMessage.senderUsername,
-      text: originalMessage.text,
-      type: messageType as 'text' | 'shared_post' | 'shared_glimpse' | 'shared_story' | 'glimpse_collab_request',
-      sharedContent: originalMessage.sharedContent,
-      mediaURL: originalMessage.mediaURL,
-      mediaType: originalMessage.mediaType,
-    };
-
-    await this.sendMessage(newConversationId, forwardedMessageData);
-  }
-
-  /**
-   * Pin/Unpin conversation (toggle)
-   */
-  async pinConversation(conversationId: string, userId: string): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-    
-    if (!conversationSnap.exists()) throw new Error('Conversation not found');
-    
-    const pinnedBy = conversationSnap.data().pinnedBy || [];
-    const isPinned = pinnedBy.includes(userId);
-    
-    await updateDoc(conversationRef, {
-      pinnedBy: isPinned 
-        ? pinnedBy.filter((id: string) => id !== userId)
-        : [...pinnedBy, userId],
-      updatedAt: serverTimestamp()
-    });
-  }
-
-  /**
-   * Mute/Unmute conversation (toggle)
-   */
-  async muteConversation(conversationId: string, userId: string): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-    
-    if (!conversationSnap.exists()) throw new Error('Conversation not found');
-    
-    const mutedBy = conversationSnap.data().mutedBy || [];
-    const isMuted = mutedBy.includes(userId);
-    
-    await updateDoc(conversationRef, {
-      mutedBy: isMuted 
-        ? mutedBy.filter((id: string) => id !== userId)
-        : [...mutedBy, userId],
-      updatedAt: serverTimestamp()
-    });
-  }
-
-  /**
-   * Archive/Unarchive conversation (toggle)
-   */
-  async archiveConversation(conversationId: string, userId: string): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-    
-    if (!conversationSnap.exists()) throw new Error('Conversation not found');
-    
-    const archivedBy = conversationSnap.data().archivedBy || [];
-    const isArchived = archivedBy.includes(userId);
-    
-    await updateDoc(conversationRef, {
-      archivedBy: isArchived 
-        ? archivedBy.filter((id: string) => id !== userId) 
-        : [...archivedBy, userId],
-      updatedAt: serverTimestamp(),
-    });
-  }
-
-  /**
-   * Forward messages to multiple users
-   */
-  async forwardMessages(fromUserId: string, toUserIds: string[], messages: Message[]): Promise<void> {
-    const currentUser = await userService.getUser(fromUserId);
-
-    for (const toUserId of toUserIds) {
-      const conversationId = await this.getOrCreateDirectConversation(fromUserId, toUserId);
-
-      for (const originalMsg of messages) {
-        const messageRef = doc(collection(db, `conversations/${conversationId}/messages`));
-        await setDoc(messageRef, {
-          messageId: messageRef.id,
-          conversationId,
-          senderId: fromUserId,
-          senderUsername: currentUser.username,
-          senderAvatarURL: currentUser.avatarURL || '',
-          text: originalMsg.text || '',
-          mediaURL: originalMsg.mediaURL,
-          mediaType: originalMsg.mediaType,
-          type: originalMsg.type,
-          sharedContent: originalMsg.sharedContent,
-          readBy: [fromUserId],
-          deletedBy: [],
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      const conversationRef = doc(db, 'conversations', conversationId);
-      await updateDoc(conversationRef, {
-        lastMessageAt: serverTimestamp(),
-        lastMessageText: messages.length > 1 ? `${messages.length} forwarded messages` : messages[0].text || 'Media',
-        [`unreadCounts.${toUserId}`]: increment(messages.length),
-      });
-    }
-  }
-
-  /**
-   * Delete conversation for user (soft delete)
-   * Marks conversation as deleted and saves deletion timestamp for message filtering
-   */
   async deleteConversation(conversationId: string, userId: string): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-    
-    if (!conversationSnap.exists()) throw new Error('Conversation not found');
-    
-    const deletedBy = conversationSnap.data().deletedBy || [];
-    const deletionTimestamps = conversationSnap.data().deletionTimestamps || {};
-    
-    // Save deletion timestamp for this user to filter old messages
-    deletionTimestamps[userId] = serverTimestamp();
-    
-    // Mark conversation as deleted for this user
-    await updateDoc(conversationRef, {
-      deletedBy: [...new Set([...deletedBy, userId])],
-      deletionTimestamps,
-      updatedAt: serverTimestamp()
-    });
-  }
-
-  /**
-   * Move conversation to requests (restrict sender)
-   * User can move unwanted chats to request mode
-   */
-  async moveConversationToRequests(conversationId: string, userId: string): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-    
-    if (!conversationSnap.exists()) throw new Error('Conversation not found');
-    
-    const data = conversationSnap.data();
-    const restrictedBy = data.restrictedBy || [];
-    
-    // Add userId to restrictedBy array
-    // This will make messages from other participant appear as requests
-    await updateDoc(conversationRef, {
-      restrictedBy: [...new Set([...restrictedBy, userId])],
-      updatedAt: serverTimestamp()
-    });
-  }
-
-  /**
-   * Unrestrict conversation (accept from requests)
-   * Removes userId from restrictedBy array, moving chat back to main list
-   */
-  async unrestrictConversation(conversationId: string, userId: string): Promise<void> {
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-    
-    if (!conversationSnap.exists()) throw new Error('Conversation not found');
-    
-    const data = conversationSnap.data();
-    const restrictedBy = data.restrictedBy || [];
-    
-    console.log('🔓 Unrestricting conversation:', {
-      conversationId,
-      userId,
-      oldRestrictedBy: restrictedBy,
-      wasRestricted: restrictedBy.includes(userId)
-    });
-    
-    // Remove userId from restrictedBy array
-    const updatedRestrictedBy = restrictedBy.filter((id: string) => id !== userId);
-    
-    console.log('✅ Updated restrictedBy:', {
-      before: restrictedBy,
-      after: updatedRestrictedBy,
-      removed: userId,
-      isEmpty: updatedRestrictedBy.length === 0
-    });
-    
-    await updateDoc(conversationRef, {
-      restrictedBy: updatedRestrictedBy,
-      updatedAt: serverTimestamp()
-    });
-    
-    console.log('✅ Conversation unrestricted successfully!');
-    console.log('   → User removed from restrictedBy');
-    console.log('   → Chat should now appear in Chats section');
-    console.log('   → Real-time listener will update UI automatically');
-  }
-
-  /**
-   * Permanently delete conversation (admin only)
-   */
-  async permanentlyDeleteConversation(conversationId: string): Promise<void> {
-    const batch = writeBatch(db);
-    
-    // Delete all messages
-    const messagesRef = collection(db, `conversations/${conversationId}/messages`);
-    const messagesSnapshot = await getDocs(messagesRef);
-    
-    messagesSnapshot.docs.forEach((messageDoc) => {
-      batch.delete(messageDoc.ref);
-    });
-    
-    // Delete conversation
-    const conversationRef = doc(db, 'conversations', conversationId);
-    batch.delete(conversationRef);
-    
-    await batch.commit();
-  }
-
-  /**
-   * Edit message
-   */
-  async editMessage(
-    conversationId: string,
-    messageId: string,
-    newText: string
-  ): Promise<void> {
-    const messageRef = doc(db, `conversations/${conversationId}/messages/${messageId}`);
-    
-    await updateDoc(messageRef, {
-      text: newText,
-      isEdited: true,
+    const convRef = doc(db, "conversations", conversationId);
+    await updateDoc(convRef, {
+      deletedBy: arrayUnion(userId),
+      [`deletionTimestamps.${userId}`]: serverTimestamp(),
+      [`unreadCounts.${userId}`]: 0,
       updatedAt: serverTimestamp(),
     });
+    this.invalidateConversationCache(conversationId);
+    await messageCacheService.clear(conversationId, userId).catch(() => undefined);
   }
-
-  /**
-   * React to message
-   */
-  async reactToMessage(
-    conversationId: string,
-    messageId: string,
-    userId: string,
-    emoji: string
-  ): Promise<void> {
-    const reactionRef = doc(
-      db,
-      `conversations/${conversationId}/messages/${messageId}/reactions/${userId}`
-    );
-    
-    await setDoc(reactionRef, {
-      userId,
-      emoji,
-      reactedAt: serverTimestamp(),
-    });
-  }
-
-
-  // ==========================================
-  // CONVERSATION SETTINGS
-  // ==========================================
-
-  /**
-   * Leave group conversation
-   */
-  async leaveGroupConversation(conversationId: string, userId: string): Promise<void> {
-    const batch = writeBatch(db);
-    
-    const conversationRef = doc(db, 'conversations', conversationId);
-    const conversationSnap = await getDoc(conversationRef);
-    const conversation = conversationSnap.data() as Conversation;
-    
-    // Remove user from participants
-    const participantIds = conversation.participantIds.filter((id) => id !== userId);
-    const groupAdmins = conversation.groupAdmins?.filter((id) => id !== userId);
-    
-    // Update unread counts
-    const unreadCounts = { ...conversation.unreadCounts };
-    delete unreadCounts[userId];
-    
-    batch.update(conversationRef, {
-      participantIds,
-      groupAdmins,
-      participantCount: participantIds.length,
-      unreadCounts,
-    });
-    
-    await batch.commit();
-  }
-
-  // ==========================================
-  // MESSAGE REQUESTS
-  // ==========================================
-
-  /**
-   * Get message requests for a user
-   */
-  async getMessageRequests(userId: string): Promise<any[]> {
-    const requestsRef = collection(db, `users/${userId}/messageRequests`);
-    const q = query(
-      requestsRef,
-      where('status', '==', 'pending'),
-      orderBy('createdAt', 'desc')
-    );
-
-    const snapshot = await getDocs(q);
-    return snapshot.docs.map((doc) => ({
-      requestId: doc.id,
-      ...doc.data(),
-    }));
-  }
-
-  /**
-   * Accept a message request
-   */
-  async acceptMessageRequest(userId: string, requestId: string): Promise<void> {
-    const requestRef = doc(db, `users/${userId}/messageRequests/${requestId}`);
-    
-    await updateDoc(requestRef, {
-      status: 'accepted',
-      acceptedAt: serverTimestamp(),
-    });
-  }
-
-  /**
-   * Decline a message request
-   */
-  async declineMessageRequest(userId: string, requestId: string): Promise<void> {
-    const requestRef = doc(db, `users/${userId}/messageRequests/${requestId}`);
-    
-    // Delete the request
-    await updateDoc(requestRef, {
-      status: 'declined',
-      declinedAt: serverTimestamp(),
-    });
-  }
-
-  /**
-   * Send a message request to a user
-   */
-  async sendMessageRequest(
-    fromUserId: string,
-    toUserId: string,
-    message: string
-  ): Promise<void> {
-    const requestRef = doc(collection(db, `users/${toUserId}/messageRequests`));
-    
-    // Fetch minimal sender info for display
-    let fromUsername = '';
-    let fromAvatarURL = '';
-    try {
-      const { userService } = await import('./user.service');
-      const sender = await userService.getUser(fromUserId);
-      if (sender) {
-        fromUsername = sender.username;
-        fromAvatarURL = sender.avatarURL || '';
-      }
-    } catch (e) {
-      // ignore, fallback to IDs only
-    }
-
-    await setDoc(requestRef, {
-      requestId: requestRef.id,
-      fromUserId,
-      toUserId,
-      fromUsername,
-      fromAvatarURL,
-      message,
-      status: 'pending',
-      createdAt: serverTimestamp(),
-    });
-  }
-
 }
 
 export const messageService = new MessageService();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

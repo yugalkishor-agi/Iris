@@ -1,7 +1,8 @@
 import React from 'react';
-import { View, Text, FlatList, TouchableOpacity, Alert, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, Alert, StyleSheet } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { FlashList } from '@shopify/flash-list';
 
 export default function RecentSearchesScreen() {
   const navigation = useNavigation();
@@ -29,7 +30,7 @@ export default function RecentSearchesScreen() {
           <Text style={styles.clear}>Clear All</Text>
         </TouchableOpacity>
       </View>
-      <FlatList
+      <FlashList estimatedItemSize={100}
         data={searches}
         renderItem={({ item }) => (
           <View style={styles.item}>

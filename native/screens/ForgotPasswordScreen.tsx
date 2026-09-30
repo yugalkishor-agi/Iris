@@ -1,6 +1,8 @@
+import { InlineLoadingSkeleton, ButtonLoadingSkeleton } from '../components/ui/LoadingSkeleton';
 import { useState } from "react";
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView } from "react-native";
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView, Alert } from "react-native";
 import { Ionicons } from '@expo/vector-icons';
+import { authService } from '../services/auth.service';
 
 export default function ForgotPasswordScreen({ navigation }: any) {
   const [email, setEmail] = useState("");
@@ -9,17 +11,25 @@ export default function ForgotPasswordScreen({ navigation }: any) {
 
   const handleSubmit = async () => {
     if (!email.trim()) {
-      alert("Please enter your email address");
+      Alert.alert("Error", "Please enter your email address");
+      return;
+    }
+
+    // Basic email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      Alert.alert("Error", "Please enter a valid email address");
       return;
     }
 
     setIsLoading(true);
     try {
-      // Will implement with authService
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      await authService.resetPassword(email);
       setIsSubmitted(true);
+      console.log('✅ Password reset email sent to:', email);
     } catch (error: any) {
-      alert(error.message || "Failed to send reset email");
+      console.error('❌ Password reset failed:', error);
+      Alert.alert("Error", error.message || "Failed to send reset email");
     } finally {
       setIsLoading(false);
     }
@@ -30,7 +40,7 @@ export default function ForgotPasswordScreen({ navigation }: any) {
       behavior={Platform.OS === "ios" ? "padding" : "height"}
       style={styles.container}
     >
-      <ScrollView contentContainerStyle={styles.scrollContent}>
+      <ScrollView contentContainerStyle={styles.scrollContent as any}>
         <TouchableOpacity 
           onPress={() => navigation.goBack()}
           style={styles.backButton}
@@ -69,7 +79,7 @@ export default function ForgotPasswordScreen({ navigation }: any) {
                   disabled={isLoading}
                 >
                   {isLoading ? (
-                    <ActivityIndicator color="#000" />
+                    <InlineLoadingSkeleton />
                   ) : (
                     <Text style={styles.submitButtonText}>Send Reset Link</Text>
                   )}
@@ -252,3 +262,4 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
 });
+

@@ -251,7 +251,7 @@ export class CacheService {
 export const cacheService = new CacheService();
 
 // Log metrics every 5 minutes in development
-if (import.meta.env.DEV) {
+if (typeof __DEV__ !== 'undefined' && __DEV__) {
   setInterval(() => {
     cacheService.logMetrics();
   }, 5 * 60 * 1000);

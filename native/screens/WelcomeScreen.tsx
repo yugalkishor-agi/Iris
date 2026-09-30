@@ -1,4 +1,5 @@
-import { View, Text, Image, StyleSheet, TouchableOpacity, Dimensions } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, Dimensions } from "react-native";
+import { Image } from 'expo-image';
 
 const { width } = Dimensions.get('window');
 
@@ -9,7 +10,7 @@ export default function WelcomeScreen({ navigation }: any) {
         <Image
           source={require('../../public/Iris-logo-splesh-screen.png')}
           style={styles.logo}
-          resizeMode="contain"
+          contentFit="contain"
         />
         <Text style={styles.tagline}>
           Share your glimpses with the world
@@ -48,7 +49,7 @@ export default function WelcomeScreen({ navigation }: any) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0D0D0D',
+    backgroundColor: '#000000',
     maxWidth: 480,
     width: '100%',
     alignSelf: 'center',
@@ -60,23 +61,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
   logo: {
-    width: width * 0.6,
-    height: width * 0.6,
-    maxWidth: 288,
-    maxHeight: 288,
+    width: 140,
+    height: 140,
+    backgroundColor: '#F5F5F5',
+    borderRadius: 24,
+    padding: 16,
   },
   tagline: {
-    color: '#888',
-    fontSize: 14,
+    color: '#999',
+    fontSize: 15,
     textAlign: 'center',
-    marginTop: 24,
+    marginTop: 32,
+    fontWeight: '400',
   },
   authSection: {
     paddingHorizontal: 24,
     paddingBottom: 48,
   },
   primaryButton: {
-    backgroundColor: '#fff',
+    backgroundColor: '#4DD0E1',
     height: 48,
     borderRadius: 8,
     justifyContent: 'center',
@@ -99,7 +102,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   loginLink: {
-    color: '#fff',
+    color: '#4DD0E1',
     fontSize: 14,
     fontWeight: '600',
   },
@@ -119,6 +122,6 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   link: {
-    color: '#fff',
+    color: '#4DD0E1',
   },
 });

@@ -26,7 +26,7 @@ export default function RequestVerificationScreen() {
         <Text style={styles.title}>Request Verification</Text>
         <View style={{ width: 28 }} />
       </View>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={styles.content as any}>
         <View style={styles.info}>
           <Ionicons name="checkmark-circle" size={48} color="#3b82f6" />
           <Text style={styles.infoTitle}>Get Verified</Text>

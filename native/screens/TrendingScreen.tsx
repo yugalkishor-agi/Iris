@@ -1,7 +1,10 @@
-import React, { useState } from 'react';
-import { View, Text, FlatList, TouchableOpacity, Image, StyleSheet, Dimensions } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Dimensions } from 'react-native';
+import { FlashList } from '@shopify/flash-list';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { postService } from '../services/post.service';
+import { Image } from 'expo-image';
 
 const { width } = Dimensions.get('window');
 const ITEM_SIZE = width / 2 - 12;
@@ -10,10 +13,27 @@ export default function TrendingScreen() {
   const navigation = useNavigation();
   const [tab, setTab] = useState('posts');
 
-  const trendingPosts = [
-    { id: '1', image: 'https://via.placeholder.com/200', likes: 5234 },
-    { id: '2', image: 'https://via.placeholder.com/200', likes: 4521 },
-  ];
+  const [trendingPosts, setTrendingPosts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadTrendingContent();
+  }, []);
+
+  const loadTrendingContent = async () => {
+    try {
+      setLoading(true);
+      // Get trending posts based on engagement
+      const trending = await postService.getTrendingPosts(20);
+      console.log('📈 Loaded trending posts:', trending.length);
+      setTrendingPosts(trending || []);
+    } catch (error) {
+      console.error('Failed to load trending:', error);
+      setTrendingPosts([]);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const trendingHashtags = [
     { id: '1', tag: 'photography', posts: 12500 },
@@ -38,7 +58,7 @@ export default function TrendingScreen() {
         </TouchableOpacity>
       </View>
       {tab === 'posts' ? (
-        <FlatList
+        <FlashList
           data={trendingPosts}
           numColumns={2}
           renderItem={({ item }) => (
@@ -51,10 +71,11 @@ export default function TrendingScreen() {
             </TouchableOpacity>
           )}
           keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.grid}
+          contentContainerStyle={styles.grid as any}
+          estimatedItemSize={width / 2}
         />
       ) : (
-        <FlatList
+        <FlashList
           data={trendingHashtags}
           renderItem={({ item }) => (
             <TouchableOpacity style={styles.hashtagItem}>
@@ -63,6 +84,7 @@ export default function TrendingScreen() {
             </TouchableOpacity>
           )}
           keyExtractor={(item) => item.id}
+          estimatedItemSize={70}
         />
       )}
     </View>

@@ -1,18 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TouchableOpacity,
-  Image,
-  ActivityIndicator,
-  Dimensions,
-} from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Dimensions } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../contexts/AuthContext';
 import { postService } from '../services/post.service';
+import { ScreenSkeleton } from '../components/ui/LoadingSkeleton';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 const { width } = Dimensions.get('window');
 const ITEM_WIDTH = width / 3;
@@ -44,9 +38,9 @@ export default function ArchiveScreen() {
   const renderPost = ({ item }: { item: any }) => (
     <TouchableOpacity
       style={styles.postItem}
-      onPress={() => navigation.navigate('PostView' as never, { postId: item.postId } as never)}
+      onPress={() => (navigation as any).navigate('PostView', { postId: item.postId })}
     >
-      <Image source={{ uri: item.mediaURLs?.[0] || 'https://via.placeholder.com/150' }} style={styles.postImage} />
+        <Image source={{ uri: item.mediaURLs?.[0] || '' }} style={styles.postImage} />
     </TouchableOpacity>
   );
 
@@ -61,9 +55,7 @@ export default function ArchiveScreen() {
       </View>
 
       {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#3b82f6" />
-        </View>
+        <ScreenSkeleton variant="grid" rows={6} />
       ) : archivedPosts.length === 0 ? (
         <View style={styles.emptyContainer}>
           <Ionicons name="archive-outline" size={64} color="#d1d5db" />
@@ -71,12 +63,12 @@ export default function ArchiveScreen() {
           <Text style={styles.emptyDescription}>Posts you archive will appear here</Text>
         </View>
       ) : (
-        <FlatList
+        <FlashList estimatedItemSize={100}
           data={archivedPosts}
           renderItem={renderPost}
           keyExtractor={(item) => item.postId}
           numColumns={3}
-          contentContainerStyle={styles.grid}
+          contentContainerStyle={styles.grid as any}
         />
       )}
     </View>
@@ -97,3 +89,6 @@ const styles = StyleSheet.create({
   postItem: { width: ITEM_WIDTH, height: ITEM_WIDTH, padding: 1 },
   postImage: { width: '100%', height: '100%' },
 });
+
+
+

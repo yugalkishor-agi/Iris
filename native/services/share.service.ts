@@ -5,19 +5,19 @@ import {
   getDoc,
   updateDoc,
   serverTimestamp,
+  increment,
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
+import { messageService } from './message.service';
 
 export class ShareService {
-  /**
-   * Share post in DM with rich preview
-   */
   async sharePostInDM(
     postId: string,
     postData: {
       authorId: string;
       authorUsername: string;
       authorAvatarURL: string;
+      authorVerified?: boolean;
       mediaURL: string;
       caption?: string;
       mediaType: 'image' | 'video';
@@ -28,36 +28,10 @@ export class ShareService {
     toUserId: string,
     message?: string
   ): Promise<void> {
-    // Create or get conversation
-    const conversationId = [fromUserId, toUserId].sort().join('_');
+    const conversationId = await messageService.getOrCreateDirectConversation(fromUserId, toUserId);
     const conversationRef = doc(db, 'conversations', conversationId);
     const convSnap = await getDoc(conversationRef);
 
-    // Create conversation if doesn't exist
-    if (!convSnap.exists()) {
-      await setDoc(conversationRef, {
-        conversationId,
-        type: 'direct',
-        participantIds: [fromUserId, toUserId],
-        participantCount: 2,
-        lastMessage: {
-          text: 'Shared a post',
-          senderId: fromUserId,
-          timestamp: serverTimestamp(),
-        },
-        unreadCounts: { [toUserId]: 1, [fromUserId]: 0 },
-        mutedBy: [],
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        lastMessageAt: serverTimestamp(),
-      });
-      console.log('✅ Conversation created successfully');
-    }
-
-    // Ensure conversation exists before creating message
-    console.log('💬 Creating message in conversation:', conversationId);
-    
-    // Send the shared post message
     const messageRef = doc(collection(db, 'conversations', conversationId, 'messages'));
     await setDoc(messageRef, {
       messageId: messageRef.id,
@@ -69,9 +43,11 @@ export class ShareService {
       sharedContent: {
         type: 'post',
         id: postId,
+        contentId: postId,
         authorId: postData.authorId,
         authorUsername: postData.authorUsername,
         authorAvatarURL: postData.authorAvatarURL,
+        verified: !!postData.authorVerified,
         coverImageURL: postData.mediaURL,
         caption: postData.caption,
         mediaType: postData.mediaType,
@@ -84,32 +60,34 @@ export class ShareService {
       createdAt: serverTimestamp(),
     });
 
-    // Update conversation
-    if (convSnap.exists()) {
-      await updateDoc(conversationRef, {
-        lastMessage: {
-          text: 'Shared a post',
-          senderId: fromUserId,
-          timestamp: serverTimestamp(),
-        },
-        lastMessageAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        [`unreadCounts.${toUserId}`]: (convSnap.data().unreadCounts?.[toUserId] || 0) + 1,
-      });
-    }
+    await updateDoc(conversationRef, {
+      lastMessage: {
+        text: 'Shared a post',
+        senderId: fromUserId,
+        timestamp: serverTimestamp(),
+      },
+      lastMessageAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      [`unreadCounts.${toUserId}`]: (convSnap.data()?.unreadCounts?.[toUserId] || 0) + 1,
+    });
 
-    console.log('✅ Post shared in DM:', { postId, from: fromUsername, to: toUserId });
+    try {
+      const postRef = doc(db, 'posts', postId);
+      await updateDoc(postRef, {
+        'stats.sharesCount': increment(1),
+        engagement: increment(1),
+        lastEngagementAt: serverTimestamp(),
+      });
+    } catch {}
   }
 
-  /**
-   * Share glimpse in DM with rich preview
-   */
   async shareGlimpseInDM(
     glimpseId: string,
     glimpseData: {
       authorId: string;
       authorUsername: string;
       authorAvatarURL: string;
+      authorVerified?: boolean;
       mediaURL: string;
       caption?: string;
       mediaType: 'image' | 'video';
@@ -120,34 +98,12 @@ export class ShareService {
     toUserId: string,
     message?: string
   ): Promise<void> {
-    // Create or get conversation
-    const conversationId = [fromUserId, toUserId].sort().join('_');
+    const conversationId = await messageService.getOrCreateDirectConversation(fromUserId, toUserId);
     const conversationRef = doc(db, 'conversations', conversationId);
     const convSnap = await getDoc(conversationRef);
 
-    // Create conversation if doesn't exist
-    if (!convSnap.exists()) {
-      await setDoc(conversationRef, {
-        conversationId,
-        type: 'direct',
-        participantIds: [fromUserId, toUserId],
-        participantCount: 2,
-        lastMessage: {
-          text: 'Shared a glimpse',
-          senderId: fromUserId,
-          timestamp: serverTimestamp(),
-        },
-        unreadCounts: { [toUserId]: 1, [fromUserId]: 0 },
-        mutedBy: [],
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        lastMessageAt: serverTimestamp(),
-      });
-    }
-
-    // Send the shared glimpse message
     const messageRef = doc(collection(db, 'conversations', conversationId, 'messages'));
-    const messageData: any = {
+    await setDoc(messageRef, {
       messageId: messageRef.id,
       senderId: fromUserId,
       senderUsername: fromUsername,
@@ -157,54 +113,48 @@ export class ShareService {
       sharedContent: {
         type: 'glimpse',
         id: glimpseId,
+        contentId: glimpseId,
         authorId: glimpseData.authorId,
         authorUsername: glimpseData.authorUsername,
         authorAvatarURL: glimpseData.authorAvatarURL,
         coverImageURL: glimpseData.mediaURL,
-        mediaType: 'video',
+        mediaType: glimpseData.mediaType || 'video',
         caption: glimpseData.caption,
       },
       createdAt: serverTimestamp(),
       status: 'sent',
       readBy: [fromUserId],
-    };
-
-    console.log('📦 Saving message to Firestore:', {
-      conversationId,
-      messageId: messageRef.id,
-      type: messageData.type,
-      hasSharedContent: !!messageData.sharedContent,
-      sharedContentType: messageData.sharedContent?.type
+      isForwarded: false,
+      isEdited: false,
+      isDeleted: false,
     });
 
-    await setDoc(messageRef, messageData);
+    await updateDoc(conversationRef, {
+      lastMessage: {
+        text: 'Shared a glimpse',
+        senderId: fromUserId,
+        timestamp: serverTimestamp(),
+      },
+      lastMessageAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      [`unreadCounts.${toUserId}`]: (convSnap.data()?.unreadCounts?.[toUserId] || 0) + 1,
+    });
 
-    // Update conversation
-    if (convSnap.exists()) {
-      await updateDoc(conversationRef, {
-        lastMessage: {
-          text: 'Shared a glimpse',
-          senderId: fromUserId,
-          timestamp: serverTimestamp(),
-        },
-        lastMessageAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        [`unreadCounts.${toUserId}`]: (convSnap.data().unreadCounts?.[toUserId] || 0) + 1,
+    try {
+      const glimpseRef = doc(db, 'glimpses', glimpseId);
+      await updateDoc(glimpseRef, {
+        'stats.sharesCount': increment(1),
       });
-    }
-
-    console.log('✅ Glimpse shared in DM:', { glimpseId, conversationId, from: fromUsername, to: toUserId });
+    } catch {}
   }
 
-  /**
-   * Share story in DM with rich preview
-   */
   async shareStoryInDM(
     storyId: string,
     storyData: {
       authorId: string;
       authorUsername: string;
       authorAvatarURL: string;
+      authorVerified?: boolean;
       mediaURL: string;
       mediaType: 'image' | 'video';
     },
@@ -214,35 +164,10 @@ export class ShareService {
     toUserId: string,
     message?: string
   ): Promise<void> {
-    console.log('📤 shareStoryInDM called:', { storyId, fromUserId, toUserId });
-    
-    // Create or get conversation
-    const conversationId = [fromUserId, toUserId].sort().join('_');
+    const conversationId = await messageService.getOrCreateDirectConversation(fromUserId, toUserId);
     const conversationRef = doc(db, 'conversations', conversationId);
     const convSnap = await getDoc(conversationRef);
 
-    // Create conversation if doesn't exist
-    if (!convSnap.exists()) {
-      console.log('📝 Creating new conversation:', conversationId);
-      await setDoc(conversationRef, {
-        conversationId,
-        type: 'direct',
-        participantIds: [fromUserId, toUserId],
-        participantCount: 2,
-        lastMessage: {
-          text: 'Shared a story',
-          senderId: fromUserId,
-          timestamp: serverTimestamp(),
-        },
-        unreadCounts: { [toUserId]: 1, [fromUserId]: 0 },
-        mutedBy: [],
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        lastMessageAt: serverTimestamp(),
-      });
-    }
-
-    // Send the shared story message
     const messageRef = doc(collection(db, 'conversations', conversationId, 'messages'));
     await setDoc(messageRef, {
       messageId: messageRef.id,
@@ -254,6 +179,7 @@ export class ShareService {
       sharedContent: {
         type: 'story',
         id: storyId,
+        contentId: storyId,
         authorId: storyData.authorId,
         authorUsername: storyData.authorUsername,
         authorAvatarURL: storyData.authorAvatarURL,
@@ -268,22 +194,18 @@ export class ShareService {
       createdAt: serverTimestamp(),
     });
 
-    // Update conversation
-    if (convSnap.exists()) {
-      await updateDoc(conversationRef, {
-        lastMessage: {
-          text: 'Shared a story',
-          senderId: fromUserId,
-          timestamp: serverTimestamp(),
-        },
-        lastMessageAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        [`unreadCounts.${toUserId}`]: (convSnap.data().unreadCounts?.[toUserId] || 0) + 1,
-      });
-    }
-
-    console.log('✅ Story shared in DM:', { storyId, from: fromUsername, to: toUserId });
+    await updateDoc(conversationRef, {
+      lastMessage: {
+        text: 'Shared a story',
+        senderId: fromUserId,
+        timestamp: serverTimestamp(),
+      },
+      lastMessageAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      [`unreadCounts.${toUserId}`]: (convSnap.data()?.unreadCounts?.[toUserId] || 0) + 1,
+    });
   }
 }
 
 export const shareService = new ShareService();
+

@@ -1,36 +1,37 @@
-import { useEffect, useState } from "react";
-import { View, Text, Image, StyleSheet, Animated } from "react-native";
+import { useEffect } from "react";
+import { View, Text, StyleSheet } from "react-native";
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withSequence,
+  withTiming,
+} from "react-native-reanimated";
 import { useAuth } from "../contexts/AuthContext";
 import { LinearGradient } from 'expo-linear-gradient';
+import { Image } from 'expo-image';
 
 export default function SplashScreen({ navigation }: any) {
   const { user, loading } = useAuth();
-  const [fadeAnim] = useState(new Animated.Value(0));
-  const [floatAnim] = useState(new Animated.Value(0));
+  const opacity = useSharedValue(0);
+  const translateY = useSharedValue(0);
 
   useEffect(() => {
-    Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 1000,
-        useNativeDriver: true,
-      }),
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(floatAnim, {
-            toValue: -10,
-            duration: 2000,
-            useNativeDriver: true,
-          }),
-          Animated.timing(floatAnim, {
-            toValue: 0,
-            duration: 2000,
-            useNativeDriver: true,
-          }),
-        ])
+    opacity.value = withTiming(1, { duration: 1000 });
+    translateY.value = withRepeat(
+      withSequence(
+        withTiming(-10, { duration: 2000 }),
+        withTiming(0, { duration: 2000 })
       ),
-    ]).start();
-  }, []);
+      -1,
+      true
+    );
+  }, [opacity, translateY]);
+
+  const contentStyle = useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    transform: [{ translateY: translateY.value }],
+  }));
 
   useEffect(() => {
     if (loading) return;
@@ -52,25 +53,25 @@ export default function SplashScreen({ navigation }: any) {
       style={styles.container}
     >
       <Animated.View 
-        style={[
-          styles.content,
-          { 
-            opacity: fadeAnim,
-            transform: [{ translateY: floatAnim }]
-          }
-        ]}
+        style={[styles.content, contentStyle]}
       >
         <Image
           source={require('../../public/Iris-logo-splesh-screen.png')}
           style={styles.logo}
-          resizeMode="contain"
+          contentFit="contain"
         />
         <Text style={styles.slogan}>
           Made with Love, Shared with the World.
         </Text>
         <View style={styles.poweredBy}>
           <Text style={styles.poweredByText}>Powered by </Text>
-          <Text style={styles.indiaText}>India</Text>
+          <View style={styles.indiaContainer}>
+            <Text style={styles.indiaTextSaffron}>I</Text>
+            <Text style={styles.indiaTextSaffron}>n</Text>
+            <Text style={styles.indiaTextWhite}>d</Text>
+            <Text style={styles.indiaTextWhite}>i</Text>
+            <Text style={styles.indiaTextGreen}>a</Text>
+          </View>
         </View>
       </Animated.View>
     </LinearGradient>
@@ -109,9 +110,22 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
-  indiaText: {
+  indiaContainer: {
+    flexDirection: 'row',
+  },
+  indiaTextSaffron: {
     fontSize: 20,
     fontWeight: 'bold',
     color: '#FF9933',
+  },
+  indiaTextWhite: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+  },
+  indiaTextGreen: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#138808',
   },
 });

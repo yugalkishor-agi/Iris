@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -6,19 +6,33 @@ import {
   ScrollView,
   TouchableOpacity,
   Switch,
+  SafeAreaView,
+  Animated,
+  Easing,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { useAuth } from '../contexts/AuthContext';
+import { settingsService } from '../services/settings.service';
+import { useColors } from '../styles/theme';
+
+type SettingScope = 'settings' | 'privacy' | 'notifications';
 
 interface SettingItem {
   label: string;
   type: 'toggle' | 'navigation' | 'action';
   icon: string;
+  description?: string;
   value?: boolean;
   onPress?: () => void;
   onToggle?: (value: boolean) => void;
   navigateTo?: string;
   danger?: boolean;
+  settingKey?: string;
+  settingScope?: SettingScope;
+  settingValue?: string | number | boolean;
+  badge?: string;
+  disabled?: boolean;
 }
 
 interface SettingsTemplateProps {
@@ -32,147 +46,390 @@ interface SettingsTemplateProps {
 export function createSettingsScreen(config: SettingsTemplateProps) {
   return function SettingsScreen() {
     const navigation = useNavigation();
+    const { user } = useAuth();
+    const themeColors = useColors();
+    const styles = useMemo(() => createStyles(themeColors), [themeColors]);
+    const intro = useRef(new Animated.Value(0)).current;
 
-    const renderItem = (item: SettingItem) => {
+    const [toggleValues, setToggleValues] = useState<Record<string, boolean>>({});
+    const [selectedValues, setSelectedValues] = useState<Record<string, any>>({});
+    const [savingKeys, setSavingKeys] = useState<Record<string, boolean>>({});
+
+    const allItems = useMemo(() => config.sections.flatMap((section) => section.items), []);
+
+    useEffect(() => {
+      Animated.timing(intro, {
+        toValue: 1,
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    }, [intro]);
+
+    useEffect(() => {
+      const loadPersistedValues = async () => {
+        if (!user?.userId) return;
+
+        try {
+          const [settings, privacy, notifications] = await Promise.all([
+            settingsService.getUserSettings(user.userId).catch(() => ({} as any)),
+            settingsService.getPrivacySettings(user.userId).catch(() => ({} as any)),
+            settingsService.getNotificationPreferences(user.userId).catch(() => ({} as any)),
+          ]);
+
+          const nextToggles: Record<string, boolean> = {};
+          const nextSelected: Record<string, any> = {};
+
+          allItems.forEach((item) => {
+            if (!item.settingKey) return;
+
+            const scope = item.settingScope || 'settings';
+            const source = scope === 'privacy' ? privacy : scope === 'notifications' ? notifications : settings;
+            const persistedValue = (source as any)?.[item.settingKey];
+
+            if (item.type === 'toggle') {
+              if (typeof persistedValue === 'boolean') {
+                nextToggles[item.settingKey] = persistedValue;
+              } else if (typeof item.value === 'boolean') {
+                nextToggles[item.settingKey] = item.value;
+              }
+            }
+
+            if (item.type === 'action' && item.settingValue !== undefined) {
+              nextSelected[item.settingKey] = persistedValue;
+            }
+          });
+
+          setToggleValues(nextToggles);
+          setSelectedValues(nextSelected);
+        } catch (error) {
+          console.error('Failed to load template settings values:', error);
+        }
+      };
+
+      loadPersistedValues();
+    }, [allItems, user?.userId]);
+
+    const persistValue = async (item: SettingItem, value: any) => {
+      if (!user?.userId || !item.settingKey) return;
+
+      const payload = { [item.settingKey]: value } as any;
+      const scope = item.settingScope || 'settings';
+
+      if (scope === 'privacy') {
+        await settingsService.updatePrivacySettings(user.userId, payload);
+        return;
+      }
+
+      if (scope === 'notifications') {
+        await settingsService.updateNotificationPreferences(user.userId, payload);
+        return;
+      }
+
+      await settingsService.updateSettings(user.userId, payload);
+    };
+
+    const handleToggle = async (item: SettingItem, value: boolean) => {
+      const key = item.settingKey || item.label;
+      const previous = toggleValues[key] ?? !!item.value;
+      if (savingKeys[key]) return;
+
+      setSavingKeys((prev) => ({ ...prev, [key]: true }));
+      setToggleValues((prev) => ({ ...prev, [key]: value }));
+
+      try {
+        await persistValue(item, value);
+        item.onToggle?.(value);
+      } catch (error) {
+        console.error('Failed to persist toggle setting:', error);
+        setToggleValues((prev) => ({ ...prev, [key]: previous }));
+      } finally {
+        setSavingKeys((prev) => ({ ...prev, [key]: false }));
+      }
+    };
+
+    const handleItemPress = async (item: SettingItem) => {
+      const key = item.settingKey || item.label;
+      if (savingKeys[key]) return;
+
+      if (item.disabled) {
+        return;
+      }
+
+      if (item.type === 'navigation' && item.navigateTo) {
+        navigation.navigate(item.navigateTo as never);
+        return;
+      }
+
+      if (item.type === 'action' && item.settingKey && item.settingValue !== undefined) {
+        const previous = selectedValues[item.settingKey];
+        setSavingKeys((prev) => ({ ...prev, [key]: true }));
+        setSelectedValues((prev) => ({ ...prev, [item.settingKey!]: item.settingValue }));
+        try {
+          await persistValue(item, item.settingValue);
+          item.onPress?.();
+        } catch (error) {
+          console.error('Failed to persist action setting:', error);
+          setSelectedValues((prev) => ({ ...prev, [item.settingKey!]: previous }));
+        } finally {
+          setSavingKeys((prev) => ({ ...prev, [key]: false }));
+        }
+        return;
+      }
+
+      item.onPress?.();
+    };
+
+    const renderItem = (item: SettingItem, index: number, total: number) => {
       const iconName = item.icon as any;
-      
+      const key = item.settingKey || item.label;
+      const toggleValue = item.type === 'toggle' ? (toggleValues[key] ?? !!item.value) : false;
+      const isSaving = !!savingKeys[key];
+      const isSelectedAction =
+        item.type === 'action' &&
+        item.settingKey &&
+        item.settingValue !== undefined &&
+        selectedValues[item.settingKey] === item.settingValue;
+
       return (
         <TouchableOpacity
-          key={item.label}
-          style={styles.settingItem}
-          onPress={() => {
-            if (item.type === 'navigation' && item.navigateTo) {
-              navigation.navigate(item.navigateTo as never);
-            } else if (item.onPress) {
-              item.onPress();
-            }
-          }}
-          disabled={item.type === 'toggle'}
+          key={`${item.label}-${item.settingKey || item.icon}`}
+          style={[styles.settingItem, index === total - 1 && styles.lastSettingItem, (isSaving || item.disabled) && styles.settingItemDisabled]}
+          onPress={() => handleItemPress(item)}
+          disabled={item.type === 'toggle' || isSaving || item.disabled}
+          activeOpacity={0.78}
         >
           <View style={styles.settingLeft}>
-            <Ionicons
-              name={iconName}
-              size={22}
-              color={item.danger ? '#ef4444' : '#6b7280'}
-              style={styles.settingIcon}
-            />
-            <Text style={[styles.settingLabel, item.danger && styles.dangerText]}>
-              {item.label}
-            </Text>
+            <View style={[styles.iconWrap, item.danger && styles.dangerIconWrap]}>
+              <Ionicons
+                name={iconName}
+                size={20}
+                color={item.danger ? '#F87171' : themeColors.accent.primary}
+              />
+            </View>
+
+            <View style={styles.settingLabelWrap}>
+              <Text style={[styles.settingLabel, item.danger && styles.dangerText]}>
+                {item.label}
+              </Text>
+              {!!item.description && (
+                <Text style={styles.settingDescription}>{item.description}</Text>
+              )}
+            </View>
           </View>
-          
-          {item.type === 'toggle' && (
+
+          {item.badge ? <View style={styles.badge}><Text style={styles.badgeText}>{item.badge}</Text></View> : null}
+
+          {item.type === 'toggle' ? (
             <Switch
-              value={item.value}
-              onValueChange={item.onToggle}
-              trackColor={{ false: '#d1d5db', true: '#93c5fd' }}
-              thumbColor={item.value ? '#3b82f6' : '#f3f4f6'}
+              value={toggleValue}
+              onValueChange={(value) => handleToggle(item, value)}
+              trackColor={{ false: themeColors.border.light, true: `${themeColors.accent.primary}66` }}
+              thumbColor={toggleValue ? '#FFFFFF' : themeColors.text.secondary}
+              disabled={isSaving || item.disabled}
             />
-          )}
-          
-          {item.type === 'navigation' && (
-            <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
+          ) : (
+            <Ionicons
+              name={isSelectedAction ? 'checkmark-circle' : 'chevron-forward'}
+              size={20}
+              color={item.disabled ? themeColors.text.muted : isSelectedAction ? themeColors.accent.primary : themeColors.text.muted}
+            />
           )}
         </TouchableOpacity>
       );
     };
 
+    const translateY = intro.interpolate({
+      inputRange: [0, 1],
+      outputRange: [14, 0],
+    });
+
     return (
-      <View style={styles.container}>
+      <SafeAreaView style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-            <Ionicons name="chevron-back" size={28} color="#000" />
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton} activeOpacity={0.75}>
+            <Ionicons name="chevron-back" size={26} color={themeColors.text.primary} />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{config.title}</Text>
           <View style={styles.placeholder} />
         </View>
 
-        <ScrollView style={styles.content}>
-          {config.sections.map((section, index) => (
-            <View key={index} style={styles.section}>
-              {section.title && (
-                <Text style={styles.sectionTitle}>{section.title}</Text>
-              )}
-              <View style={styles.settingsGroup}>
-                {section.items.map(renderItem)}
+        <Animated.ScrollView
+          style={styles.content}
+          contentContainerStyle={styles.contentContainer as any}
+          showsVerticalScrollIndicator={false}
+        >
+          <Animated.View
+            style={{
+              opacity: intro,
+              transform: [{ translateY }],
+            }}
+          >
+            {config.sections.map((section, index) => (
+              <View key={index} style={styles.section}>
+                {section.title ? (
+                  <Text style={styles.sectionTitle}>{section.title}</Text>
+                ) : null}
+                <View style={styles.settingsGroup}>
+                  {section.items.map((item, itemIndex) => renderItem(item, itemIndex, section.items.length))}
+                </View>
               </View>
-            </View>
-          ))}
-        </ScrollView>
-      </View>
+            ))}
+          </Animated.View>
+        </Animated.ScrollView>
+      </SafeAreaView>
     );
   };
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e7eb',
-  },
-  backButton: {
-    padding: 4,
-  },
-  headerTitle: {
-    flex: 1,
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#000',
-    marginLeft: 12,
-  },
-  placeholder: {
-    width: 36,
-  },
-  content: {
-    flex: 1,
-  },
-  section: {
-    marginTop: 24,
-  },
-  sectionTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#6b7280',
-    textTransform: 'uppercase',
-    paddingHorizontal: 16,
-    marginBottom: 8,
-  },
-  settingsGroup: {
-    backgroundColor: '#fff',
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: '#e5e7eb',
-  },
-  settingItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  settingLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  settingIcon: {
-    marginRight: 12,
-  },
-  settingLabel: {
-    fontSize: 16,
-    color: '#000',
-  },
-  dangerText: {
-    color: '#ef4444',
-  },
-});
+const createStyles = (themeColors: ReturnType<typeof useColors>) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: themeColors.background.primary,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 18,
+      paddingVertical: 14,
+      borderBottomWidth: 1,
+      borderBottomColor: themeColors.border.subtle,
+      backgroundColor: themeColors.background.primary,
+    },
+    backButton: {
+      width: 36,
+      alignItems: 'flex-start',
+      justifyContent: 'center',
+    },
+    headerTitle: {
+      flex: 1,
+      fontSize: 18,
+      fontWeight: '700',
+      color: themeColors.text.primary,
+      textAlign: 'center',
+    },
+    placeholder: {
+      width: 36,
+    },
+    content: {
+      flex: 1,
+    },
+    contentContainer: {
+      paddingHorizontal: 16,
+      paddingTop: 18,
+      paddingBottom: 32,
+    },
+    section: {
+      marginBottom: 22,
+    },
+    sectionTitle: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: themeColors.text.muted,
+      textTransform: 'uppercase',
+      letterSpacing: 0.7,
+      marginBottom: 10,
+      paddingHorizontal: 4,
+    },
+    settingsGroup: {
+      backgroundColor: themeColors.background.tertiary,
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: themeColors.border.subtle,
+      overflow: 'hidden',
+    },
+    settingItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 16,
+      paddingVertical: 15,
+      minHeight: 70,
+      borderBottomWidth: 1,
+      borderBottomColor: themeColors.border.subtle,
+    },
+    lastSettingItem: {
+      borderBottomWidth: 0,
+    },
+    settingItemDisabled: {
+      opacity: 0.62,
+    },
+    settingLeft: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flex: 1,
+      marginRight: 14,
+    },
+    iconWrap: {
+      width: 40,
+      height: 40,
+      borderRadius: 14,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginRight: 14,
+      backgroundColor: `${themeColors.accent.primary}16`,
+    },
+    dangerIconWrap: {
+      backgroundColor: 'rgba(248, 113, 113, 0.12)',
+    },
+    settingLabelWrap: {
+      flex: 1,
+    },
+    settingLabel: {
+      fontSize: 16,
+      fontWeight: '600',
+      color: themeColors.text.primary,
+    },
+    settingDescription: {
+      marginTop: 3,
+      fontSize: 13,
+      color: themeColors.text.secondary,
+      lineHeight: 18,
+    },
+    settingRight: {
+      minWidth: 76,
+      alignItems: 'flex-end',
+      justifyContent: 'center',
+      marginLeft: 12,
+    },
+    badge: {
+      marginRight: 10,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      borderRadius: 999,
+      backgroundColor: themeColors.background.secondary,
+      borderWidth: 1,
+      borderColor: themeColors.border.light,
+    },
+    badgeText: {
+      fontSize: 11,
+      fontWeight: '700',
+      color: themeColors.text.secondary,
+      letterSpacing: 0.2,
+    },    savingBadge: {
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+      backgroundColor: `${themeColors.accent.primary}18`,
+      borderWidth: 1,
+      borderColor: `${themeColors.accent.primary}36`,
+    },
+    savingBadgeText: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: themeColors.accent.primary,
+    },
+    dangerText: {
+      color: '#F87171',
+    },
+  });
+
+
+
+
+
+
+
+

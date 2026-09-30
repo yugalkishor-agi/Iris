@@ -1,37 +1,30 @@
+import { InlineLoadingSkeleton, ButtonLoadingSkeleton } from '../components/ui/LoadingSkeleton';
 import { useState } from "react";
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Image, ActivityIndicator, ScrollView, KeyboardAvoidingView, Platform } from "react-native";
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, ScrollView, KeyboardAvoidingView, Platform, Alert } from "react-native";
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from "../contexts/AuthContext";
+import { Image } from 'expo-image';
 
 export default function LoginScreen({ navigation }: any) {
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const { signIn, signInWithGoogle, loading } = useAuth();
-  const [googleLoading, setGoogleLoading] = useState(false);
+  const { signIn, loading } = useAuth();
 
   const handleLogin = async () => {
+    if (!email || !password) {
+      Alert.alert("Error", "Please enter email and password");
+      return;
+    }
+    
     try {
       await signIn(email, password);
-      navigation.replace("Main");
+      // Navigation will happen automatically when auth state updates
     } catch (error: any) {
-      alert(error.message || "Invalid email or password");
+      Alert.alert("Login failed", error.message || "Invalid email or password");
     }
   };
 
-  const handleGoogleSignIn = async () => {
-    setGoogleLoading(true);
-    try {
-      await signInWithGoogle();
-      navigation.replace("Main");
-    } catch (error: any) {
-      if (error.message !== 'Sign in cancelled') {
-        alert(error.message || "Could not sign in with Google");
-      }
-    } finally {
-      setGoogleLoading(false);
-    }
-  };
 
   return (
     <KeyboardAvoidingView 
@@ -39,7 +32,7 @@ export default function LoginScreen({ navigation }: any) {
       style={styles.container}
     >
       <ScrollView 
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={styles.scrollContent as any}
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.header}>
@@ -52,7 +45,7 @@ export default function LoginScreen({ navigation }: any) {
           <Image
             source={require('../../public/Iris-logo.png')}
             style={styles.logo}
-            resizeMode="contain"
+            contentFit="contain"
           />
           <View style={styles.spacer} />
         </View>
@@ -117,33 +110,13 @@ export default function LoginScreen({ navigation }: any) {
               disabled={loading}
             >
               {loading ? (
-                <ActivityIndicator color="#000" />
+                <InlineLoadingSkeleton />
               ) : (
                 <Text style={styles.loginButtonText}>Login</Text>
               )}
             </TouchableOpacity>
           </View>
 
-          <View style={styles.dividerContainer}>
-            <View style={styles.divider} />
-            <Text style={styles.dividerText}>Or continue with</Text>
-            <View style={styles.divider} />
-          </View>
-
-          <TouchableOpacity
-            style={styles.googleButton}
-            onPress={handleGoogleSignIn}
-            disabled={googleLoading || loading}
-          >
-            {googleLoading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <>
-                <Ionicons name="logo-google" size={20} color="#fff" />
-                <Text style={styles.googleButtonText}>Continue with Google</Text>
-              </>
-            )}
-          </TouchableOpacity>
 
           <View style={styles.signupSection}>
             <Text style={styles.signupText}>Don't have an account? </Text>
@@ -160,7 +133,7 @@ export default function LoginScreen({ navigation }: any) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0D0D0D',
+    backgroundColor: '#000',
   },
   scrollContent: {
     flexGrow: 1,
@@ -184,7 +157,7 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     paddingHorizontal: 24,
-    paddingTop: 16,
+    paddingTop: 8,
   },
   titleSection: {
     alignItems: 'center',
@@ -216,9 +189,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#1a1a1a',
-    borderRadius: 8,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: '#333',
   },
   inputIcon: {
     marginLeft: 12,
@@ -248,8 +221,8 @@ const styles = StyleSheet.create({
   },
   loginButton: {
     backgroundColor: '#fff',
-    height: 48,
-    borderRadius: 8,
+    height: 52,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -260,38 +233,6 @@ const styles = StyleSheet.create({
     color: '#000',
     fontSize: 16,
     fontWeight: '600',
-  },
-  dividerContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 24,
-  },
-  divider: {
-    flex: 1,
-    height: 1,
-    backgroundColor: '#2a2a2a',
-  },
-  dividerText: {
-    color: '#888',
-    fontSize: 12,
-    paddingHorizontal: 12,
-    textTransform: 'uppercase',
-  },
-  googleButton: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-    height: 48,
-    borderRadius: 8,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 8,
-  },
-  googleButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '500',
   },
   signupSection: {
     flexDirection: 'row',
@@ -308,3 +249,4 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 });
+

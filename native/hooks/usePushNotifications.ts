@@ -1,27 +1,24 @@
 import { useEffect } from 'react';
+import { Platform } from 'react-native';
 import { useAuth } from '../contexts/AuthContext';
-import { nativePushNotificationService } from '../../src/services/pushNotification.native.service';
+import { pushService } from '../services/push.service';
 
 /**
  * Hook to initialize push notifications for logged-in users
  */
 export function usePushNotifications() {
   const { user } = useAuth();
+  const currentUserId = user?.userId ?? null;
 
   useEffect(() => {
-    if (user && nativePushNotificationService.isNativePlatform()) {
-      // Initialize push notifications for native platforms
-      console.log('[Push Hook] Initializing push notifications for user:', user.userId);
-      nativePushNotificationService.initialize(user.userId);
-
-      return () => {
-        // Cleanup listeners on unmount
-        console.log('[Push Hook] Cleaning up push notification listeners');
-      };
+    if (currentUserId && Platform.OS !== 'web') {
+      // Register for push notifications using Expo on native platforms
+      console.log('[Push Hook] Registering for push notifications for user:', currentUserId);
+      pushService.registerForPushNotifications(currentUserId);
     }
-  }, [user]);
+  }, [currentUserId]);
 
   return {
-    isNative: nativePushNotificationService.isNativePlatform()
+    isNative: Platform.OS !== 'web'
   };
 }

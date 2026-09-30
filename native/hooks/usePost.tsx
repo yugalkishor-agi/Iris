@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { postService } from '../services/post.service';
 import { cacheService } from '../services/cache.service';
+import { cacheIntegration } from '../services/cacheIntegration.service';
 import type { Post } from '../types/database';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -50,8 +51,8 @@ export const useFeed = (page: number = 1) => {
         }
         
         // Get following list
-        const { userService } = await import('../../src/services/user.service');
-        const { glimpseService } = await import('../../src/services/glimpse.service');
+        const { userService } = await import('../services/user.service');
+        const { glimpseService } = await import('../services/glimpse.service');
         const followingIds = await cacheService.getFollowingList(
           userId,
           () => userService.getFollowing(userId)
@@ -160,7 +161,6 @@ export const usePostActions = () => {
     setLiking(true);
     try {
       await postService.likePost(postId, user.userId);
-      cacheService.invalidatePost(postId);
     } catch (error) {
       throw error;
     } finally {
@@ -174,7 +174,6 @@ export const usePostActions = () => {
     setLiking(true);
     try {
       await postService.unlikePost(postId, user.userId);
-      cacheService.invalidatePost(postId);
     } catch (error) {
       console.error('Failed to unlike post:', error);
       throw error;
@@ -203,12 +202,10 @@ export const usePostActions = () => {
       setCommenting(false);
     }
   };
-
   const savePost = async (postId: string) => {
     if (!user) throw new Error('Not authenticated');
     await postService.savePost(postId, user.userId);
   };
-
   const unsavePost = async (postId: string) => {
     if (!user) throw new Error('Not authenticated');
     await postService.unsavePost(postId, user.userId);
@@ -229,209 +226,275 @@ export const useComments = (postId: string, collectionType: 'posts' | 'glimpses'
   const { user } = useAuth();
   const [comments, setComments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const commentsRef = useRef<any[]>([]);
+  const commentsCacheKey = postId ? 'comments_v3:' + collectionType + ':' + postId : '';
 
   useEffect(() => {
+    commentsRef.current = comments;
+  }, [comments]);
+  const writeCommentsCache = (items: any[]) => {
+    if (!commentsCacheKey) return;
+    void cacheIntegration.cacheData(commentsCacheKey, items, 5 * 60 * 1000);
+  };
+  const updateComments = (updater: any[] | ((prev: any[]) => any[])) => {
+    setComments((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      writeCommentsCache(next);
+      return next;
+    });
+  };
+  useEffect(() => {
     if (!postId) return;
-
+    let active = true;
     const loadComments = async () => {
       try {
-        setLoading(true);
-        console.log('🔍 Loading comments for:', { postId, collectionType });
-        
-        // Import Firestore functions
-        const { collection: firestoreCollection, query, orderBy: firestoreOrderBy, getDocs } = await import('firebase/firestore');
-        const { db } = await import('../../src/config/firebase');
-        
-        // Query comments from the appropriate collection
-        const commentsRef = firestoreCollection(db, collectionType, postId, 'comments');
-        console.log('📍 Querying path:', `${collectionType}/${postId}/comments`);
-        const q = query(commentsRef, firestoreOrderBy('createdAt', 'desc'));
+        if (commentsRef.current.length === 0) {
+          setLoading(true);
+        }
+        if (commentsRef.current.length === 0 && commentsCacheKey) {
+          const cached = await cacheIntegration.getCachedData(commentsCacheKey);
+          if (active && Array.isArray(cached) && cached.length > 0) {
+            setComments(cached);
+            setLoading(false);
+          }
+        }
+        const {
+          collection: firestoreCollection,
+          query,
+          orderBy: firestoreOrderBy,
+          getDocs,
+          doc: firestoreDoc,
+          getDoc,
+        } = await import('firebase/firestore');
+        const { db } = await import('../config/firebase');
+        const commentsColRef = firestoreCollection(db, collectionType, postId, 'comments');
+        const q = query(commentsColRef, firestoreOrderBy('createdAt', 'desc'));
         const snapshot = await getDocs(q);
-        console.log('✅ Found comments:', snapshot.size);
-        
-        const commentsData = snapshot.docs.map(doc => ({
-          commentId: doc.id,
-          ...doc.data(),
-          isLiked: false, // TODO: Check if user liked
+        const rawComments = snapshot.docs.map((docSnap) => ({
+          commentId: docSnap.id,
+          ...docSnap.data(),
         }));
-        
-        console.log('💬 Comments data:', commentsData);
+        const authorIds = Array.from(new Set(rawComments.map((item: any) => item.authorId).filter(Boolean)));
+        const authorVerification = new Map<string, boolean>();
+        await Promise.all(authorIds.map(async (authorId) => {
+          try {
+            const userRef = firestoreDoc(db, 'users', authorId);
+            const userSnap = await getDoc(userRef);
+            authorVerification.set(authorId, !!userSnap.data()?.isVerified);
+          } catch {
+            authorVerification.set(authorId, false);
+          }
+        }));
+        const commentsData = rawComments.map((item: any) => ({
+          ...item,
+          isLiked: false,
+          isVerified: !!authorVerification.get(item.authorId),
+        }));
+        if (!active) return;
         setComments(commentsData);
-      } catch (error) {
-        console.error('❌ Failed to load comments:', error);
-        setComments([]);
-      } finally {
+        writeCommentsCache(commentsData);
         setLoading(false);
+        if (user?.userId && snapshot.docs.length > 0) {
+          void (async () => {
+            try {
+              const checks = await Promise.all(
+                snapshot.docs.map(async (docSnap) => {
+                  const likeRef = firestoreDoc(db, collectionType, postId, 'comments', docSnap.id, 'likes', user.userId);
+                  const likeSnap = await getDoc(likeRef);
+                  return { commentId: docSnap.id, liked: likeSnap.exists() };
+                })
+              );
+              if (!active) return;
+              const likedMap = new Map(checks.map((item) => [item.commentId, item.liked]));
+              updateComments((prev) => prev.map((comment) => ({
+                ...comment,
+                isLiked: !!likedMap.get(comment.commentId),
+              })));
+            } catch (error) {
+              console.error('Failed to hydrate liked comment state:', error);
+            }
+          })();
+        }
+      } catch (error) {
+        console.error('Failed to load comments:', error);
+        if (active && commentsRef.current.length === 0) {
+          setComments([]);
+        }
+      } finally {
+        if (active) setLoading(false);
       }
     };
-
-    loadComments();
-  }, [postId, collectionType]);
-
+    void loadComments();
+    return () => {
+      active = false;
+    };
+  }, [collectionType, commentsCacheKey, postId, user?.userId]);
   const addComment = async (text: string, parentCommentId?: string) => {
     if (!user) throw new Error('Not authenticated');
-    
-    // Import Firestore functions
-    const { collection: firestoreCollection, doc: firestoreDoc, setDoc, serverTimestamp, increment: firestoreIncrement, updateDoc } = await import('firebase/firestore');
-    const { db } = await import('../../src/config/firebase');
-    
-    // Create comment in the appropriate collection
+    const {
+      collection: firestoreCollection,
+      doc: firestoreDoc,
+      setDoc,
+      serverTimestamp,
+      increment: firestoreIncrement,
+      updateDoc,
+    } = await import('firebase/firestore');
+    const { db } = await import('../config/firebase');
     const commentRef = firestoreDoc(firestoreCollection(db, collectionType, postId, 'comments'));
     const commentId = commentRef.id;
-    
-    const commentData: any = {
+    const optimisticComment: any = {
       commentId,
       authorId: user.userId,
       authorUsername: user.username,
       authorAvatarURL: user.avatarURL || '',
       text,
-      createdAt: serverTimestamp(),
+      createdAt: new Date(),
       likesCount: 0,
+      isLiked: false,
+      isVerified: !!(user as any)?.isVerified,
+      ...(parentCommentId ? { parentCommentId } : {}),
     };
-    
-    // Add parentCommentId if this is a reply
-    if (parentCommentId) {
-      commentData.parentCommentId = parentCommentId;
-    }
-    
-    await setDoc(commentRef, commentData);
-    
-    // Update comment count
-    const parentRef = firestoreDoc(db, collectionType, postId);
-    await updateDoc(parentRef, {
-      commentsCount: firestoreIncrement(1),
-      repliesCount: firestoreIncrement(1), // For glimpses
-    });
-    
-    // Reload comments
-    const commentsRef = firestoreCollection(db, collectionType, postId, 'comments');
-    const { query, orderBy: firestoreOrderBy, getDocs } = await import('firebase/firestore');
-    const q = query(commentsRef, firestoreOrderBy('createdAt', 'desc'));
-    const snapshot = await getDocs(q);
-    
-    const commentsData = await Promise.all(snapshot.docs.map(async (doc) => {
-      const data = doc.data();
-      // Fetch user verification status
-      let isVerified = false;
-      try {
-        const { doc: firestoreDoc, getDoc } = await import('firebase/firestore');
-        const userRef = firestoreDoc(db, 'users', data.authorId);
-        const userSnap = await getDoc(userRef);
-        if (userSnap.exists()) {
-          isVerified = userSnap.data().isVerified || false;
-        }
-      } catch (err) {
-        console.error('Failed to fetch user verification:', err);
-      }
-      
-      return {
-        commentId: doc.id,
-        ...data,
-        isLiked: false,
-        isVerified,
+    updateComments((prev) => [optimisticComment, ...prev]);
+    try {
+      const commentData: any = {
+        commentId,
+        authorId: user.userId,
+        authorUsername: user.username,
+        authorAvatarURL: user.avatarURL || '',
+        text,
+        createdAt: serverTimestamp(),
+        likesCount: 0,
       };
-    }));
-    
-    setComments(commentsData);
+      if (parentCommentId) {
+        commentData.parentCommentId = parentCommentId;
+      }
+      await setDoc(commentRef, commentData);
+      const parentRef = firestoreDoc(db, collectionType, postId);
+      const updates: any = { 'stats.commentsCount': firestoreIncrement(1) };
+      if (collectionType === 'glimpses') {
+        updates.repliesCount = firestoreIncrement(1);
+      }
+      await updateDoc(parentRef, updates);
+    } catch (error) {
+      updateComments((prev) => prev.filter((comment) => comment.commentId !== commentId));
+      throw error;
+    }
   };
-
   const likeComment = async (commentId: string, glimpseAuthorId?: string) => {
     if (!user) throw new Error('Not authenticated');
-    
-    const { doc: firestoreDoc, setDoc, serverTimestamp, increment: firestoreIncrement, writeBatch } = await import('firebase/firestore');
-    const { db } = await import('../../src/config/firebase');
-    
-    // Check if this is the glimpse/post author liking
+    const {
+      doc: firestoreDoc,
+      setDoc,
+      serverTimestamp,
+      increment: firestoreIncrement,
+      writeBatch,
+    } = await import('firebase/firestore');
+    const { db } = await import('../config/firebase');
     const isCreatorLike = glimpseAuthorId && user.userId === glimpseAuthorId;
-    
-    const batch = writeBatch(db);
-    
-    // Add like document
-    const likeRef = firestoreDoc(db, collectionType, postId, 'comments', commentId, 'likes', user.userId);
-    batch.set(likeRef, {
-      userId: user.userId,
-      likedAt: serverTimestamp(),
-    });
-    
-    // Update like count and likedByCreator flag
-    const commentRef = firestoreDoc(db, collectionType, postId, 'comments', commentId);
-    const updateData: any = {
-      likesCount: firestoreIncrement(1),
-      updatedAt: serverTimestamp(),
-    };
-    if (isCreatorLike) {
-      updateData.likedByCreator = true;
-    }
-    batch.update(commentRef, updateData);
-    
-    await batch.commit();
-    
-    // Update local state with creator flag if applicable
-    setComments(comments.map(c => 
-      c.commentId === commentId 
-        ? { 
-            ...c, 
-            likesCount: c.likesCount + 1, 
+    updateComments((prev) => prev.map((comment) =>
+      comment.commentId === commentId
+        ? {
+            ...comment,
+            likesCount: Math.max(0, Number(comment.likesCount || 0) + 1),
             isLiked: true,
-            likedByCreator: isCreatorLike ? true : c.likedByCreator
+            likedByCreator: isCreatorLike ? true : comment.likedByCreator,
           }
-        : c
+        : comment
     ));
+    try {
+      const batch = writeBatch(db);
+      const likeRef = firestoreDoc(db, collectionType, postId, 'comments', commentId, 'likes', user.userId);
+      batch.set(likeRef, {
+        userId: user.userId,
+        likedAt: serverTimestamp(),
+      });
+      const commentRef = firestoreDoc(db, collectionType, postId, 'comments', commentId);
+      const updateData: any = {
+        likesCount: firestoreIncrement(1),
+        updatedAt: serverTimestamp(),
+      };
+      if (isCreatorLike) updateData.likedByCreator = true;
+      batch.update(commentRef, updateData);
+      await batch.commit();
+    } catch (error) {
+      updateComments((prev) => prev.map((comment) =>
+        comment.commentId === commentId
+          ? {
+              ...comment,
+              likesCount: Math.max(0, Number(comment.likesCount || 1) - 1),
+              isLiked: false,
+            }
+          : comment
+      ));
+      throw error;
+    }
   };
-
-  const unlikeComment = async (commentId: string, glimpseAuthorId?: string) => {
+  const unlikeComment = async (commentId: string, _glimpseAuthorId?: string) => {
     if (!user) throw new Error('Not authenticated');
-    
-    const { doc: firestoreDoc, deleteDoc, increment: firestoreIncrement, writeBatch, serverTimestamp } = await import('firebase/firestore');
-    const { db } = await import('../../src/config/firebase');
-    
-    // Check if this is the creator unliking
-    const isCreatorUnlike = glimpseAuthorId && user.userId === glimpseAuthorId;
-    
-    const batch = writeBatch(db);
-    
-    // Remove like document
-    const likeRef = firestoreDoc(db, collectionType, postId, 'comments', commentId, 'likes', user.userId);
-    batch.delete(likeRef);
-    
-    // Update like count
-    const commentRef = firestoreDoc(db, collectionType, postId, 'comments', commentId);
-    batch.update(commentRef, {
-      likesCount: firestoreIncrement(-1),
-      updatedAt: serverTimestamp(),
-    });
-    
-    await batch.commit();
-    
-    // Update local state (force new array reference for re-render)
-    setComments([...comments.map(c => 
-      c.commentId === commentId 
-        ? { ...c, likesCount: Math.max(0, c.likesCount - 1), isLiked: false }
-        : c
-    )]);
+    const {
+      doc: firestoreDoc,
+      writeBatch,
+      serverTimestamp,
+      increment: firestoreIncrement,
+    } = await import('firebase/firestore');
+    const { db } = await import('../config/firebase');
+    updateComments((prev) => prev.map((comment) =>
+      comment.commentId === commentId
+        ? {
+            ...comment,
+            likesCount: Math.max(0, Number(comment.likesCount || 0) - 1),
+            isLiked: false,
+          }
+        : comment
+    ));
+    try {
+      const batch = writeBatch(db);
+      const likeRef = firestoreDoc(db, collectionType, postId, 'comments', commentId, 'likes', user.userId);
+      batch.delete(likeRef);
+      const commentRef = firestoreDoc(db, collectionType, postId, 'comments', commentId);
+      batch.update(commentRef, {
+        likesCount: firestoreIncrement(-1),
+        updatedAt: serverTimestamp(),
+      });
+      await batch.commit();
+    } catch (error) {
+      updateComments((prev) => prev.map((comment) =>
+        comment.commentId === commentId
+          ? {
+              ...comment,
+              likesCount: Math.max(0, Number(comment.likesCount || 0) + 1),
+              isLiked: true,
+            }
+          : comment
+      ));
+      throw error;
+    }
   };
-
   const deleteComment = async (commentId: string) => {
     if (!user) throw new Error('Not authenticated');
-    
-    const { doc: firestoreDoc, deleteDoc, updateDoc, increment: firestoreIncrement } = await import('firebase/firestore');
-    const { db } = await import('../../src/config/firebase');
-    
-    // Delete comment document
-    const commentRef = firestoreDoc(db, collectionType, postId, 'comments', commentId);
-    await deleteDoc(commentRef);
-    
-    // Decrement comment count
-    const parentRef = firestoreDoc(db, collectionType, postId);
-    await updateDoc(parentRef, {
-      commentsCount: firestoreIncrement(-1),
-      repliesCount: firestoreIncrement(-1),
-    });
-    
-    // Update local state
-    setComments(comments.filter(c => c.commentId !== commentId));
+    const {
+      doc: firestoreDoc,
+      deleteDoc,
+      updateDoc,
+      increment: firestoreIncrement,
+    } = await import('firebase/firestore');
+    const { db } = await import('../config/firebase');
+    const snapshot = comments;
+    updateComments((prev) => prev.filter((comment) => comment.commentId !== commentId));
+    try {
+      const commentRef = firestoreDoc(db, collectionType, postId, 'comments', commentId);
+      await deleteDoc(commentRef);
+      const parentRef = firestoreDoc(db, collectionType, postId);
+      const updates: any = { 'stats.commentsCount': firestoreIncrement(-1) };
+      if (collectionType === 'glimpses') {
+        updates.repliesCount = firestoreIncrement(-1);
+      }
+      await updateDoc(parentRef, updates);
+    } catch (error) {
+      updateComments(snapshot);
+      throw error;
+    }
   };
-
   return {
     comments,
     loading,
@@ -441,3 +504,5 @@ export const useComments = (postId: string, collectionType: 'posts' | 'glimpses'
     deleteComment,
   };
 };
+
+

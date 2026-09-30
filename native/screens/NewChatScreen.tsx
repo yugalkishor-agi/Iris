@@ -1,27 +1,26 @@
-import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TextInput,
-  FlatList,
-  TouchableOpacity,
-  Image,
-  ActivityIndicator,
-} from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, ActivityIndicator, SafeAreaView, RefreshControl, Alert } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../contexts/AuthContext';
 import { userService } from '../services/user.service';
+import { messageService } from '../services/message.service';
+import { colors, spacing, typography } from '../styles/theme';
+import { Avatar } from '../components/ui/Avatar';
 import type { User } from '../types/database';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 export default function NewChatScreen() {
   const navigation = useNavigation();
   const { user } = useAuth();
   const [search, setSearch] = useState('');
   const [following, setFollowing] = useState<User[]>([]);
+  const [recentChats, setRecentChats] = useState<User[]>([]);
   const [filteredUsers, setFilteredUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [tab, setTab] = useState<'recent' | 'following'>('recent');
 
   useEffect(() => {
     loadFollowing();
@@ -66,13 +65,13 @@ export default function NewChatScreen() {
   };
 
   const handleSelectUser = (selectedUser: User) => {
-    navigation.navigate('Chat' as never, { userId: selectedUser.userId } as never);
+    (navigation as any).navigate('Chat', { userId: selectedUser.userId });
   };
 
   const renderUser = ({ item }: { item: User }) => (
     <TouchableOpacity style={styles.userItem} onPress={() => handleSelectUser(item)}>
       <Image
-        source={{ uri: item.avatarURL || 'https://via.placeholder.com/50' }}
+        source={{ uri: item.avatarURL || '' }}
         style={styles.avatar}
       />
       <View style={styles.userInfo}>
@@ -132,11 +131,11 @@ export default function NewChatScreen() {
           </Text>
         </View>
       ) : (
-        <FlatList
+        <FlashList estimatedItemSize={100}
           data={filteredUsers}
           renderItem={renderUser}
           keyExtractor={(item) => item.userId}
-          contentContainerStyle={styles.listContainer}
+          contentContainerStyle={styles.listContainer as any}
         />
       )}
     </View>

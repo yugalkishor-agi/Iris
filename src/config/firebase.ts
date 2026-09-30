@@ -37,7 +37,7 @@ auth.onAuthStateChanged((user) => {
 // Connect to emulators in development (DISABLED - using production Firebase)
 // Uncomment below to use local emulators
 /*
-if (import.meta.env.DEV) {
+if (typeof __DEV__ !== 'undefined' && __DEV__) {
   try {
     connectFirestoreEmulator(db, 'localhost', 8080);
     connectAuthEmulator(auth, 'http://localhost:9099');

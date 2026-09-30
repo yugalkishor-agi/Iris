@@ -1,10 +1,22 @@
 import { createClient } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { backendConfigSummary, runtimeConfig, runtimeConfigSource } from './runtimeConfig';
 
-const supabaseUrl = 'https://shaqlzwarwjeozjtugdo.supabase.co';
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoYXFsendhcndqZW96anR1Z2RvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk0NzYwNzUsImV4cCI6MjA3NTA1MjA3NX0.3L-e6nEZp9owu91rUpcj6VVPzGQrPTCEEKNNq2U56Fg';
+if (__DEV__ && runtimeConfigSource.supabaseFromFallback) {
+  console.warn(
+    '[Config] Supabase env vars not injected. Using temporary fallback values from config/runtimeConfig.ts.'
+  );
+}
 
-// Initialize Supabase client with AsyncStorage for React Native
+const supabaseUrl = runtimeConfig.supabase.url;
+if (__DEV__) {
+  console.log(
+    `[Config] Supabase target url=${backendConfigSummary.supabase.url} tempOverride=${backendConfigSummary.supabase.tempOverrideEnabled}`
+  );
+}
+const supabaseKey = runtimeConfig.supabase.anonKey;
+const cdnUrl = runtimeConfig.supabase.cdnUrl;
+
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     storage: AsyncStorage,
@@ -14,25 +26,13 @@ export const supabase = createClient(supabaseUrl, supabaseKey, {
   },
 });
 
-// CDN URL for optimized media delivery
-const cdnUrl = 'https://cdn.supabase.co/shaqlzwarwjeozjtugdo';
-
-/**
- * Get media URL with optional CDN
- * @param path - Storage path (e.g., 'avatars/user123.jpg')
- * @param useCDN - Whether to use CDN (default: false)
- * @returns Full URL to media file
- */
 export const getMediaUrl = (path: string, useCDN = false): string => {
-  if (useCDN) {
-    return `${cdnUrl}/storage/v1/object/public/${path}`;
+  if (useCDN && cdnUrl) {
+    return `${cdnUrl.replace(/\/$/, '')}/storage/v1/object/public/${path}`;
   }
-  return `${supabaseUrl}/storage/v1/object/public/${path}`;
+  return `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public/${path}`;
 };
 
-/**
- * Storage bucket names
- */
 export const STORAGE_BUCKETS = {
   AVATARS: 'avatars',
   POSTS: 'posts',

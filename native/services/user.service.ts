@@ -13,13 +13,84 @@ import {
   increment,
   serverTimestamp,
   writeBatch,
+  runTransaction,
   Timestamp,
+  documentId,
+  startAfter,
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import type { User, CreateUserData, Following, Follower } from '../types/database';
-import { storageService, STORAGE_KEYS } from './storage.service';
+import { cacheIntegration } from './cacheIntegration.service';
+import { cacheService } from './cache.service';
+
+const ACTIVE_USERS_WINDOW_MS = 5 * 60 * 1000;
+const ACTIVE_USERS_CACHE_TTL_MS = 30 * 1000;
+const USER_SEARCH_CACHE_TTL_MS = 45 * 1000;
+const USER_SEARCH_SCAN_PAGE_SIZE = 250;
+const USER_SEARCH_SCAN_MAX_DOCS = 3000;
 
 export class UserService {
+  private activeUsersCache = new Map<string, { users: User[]; expiresAt: number }>();
+  private searchUsersCache: { users: User[]; expiresAt: number } | null = null;
+
+  private normalizeUserFromDoc(docSnap: any): User {
+    const raw = (docSnap?.data?.() || {}) as any;
+    return {
+      ...(raw as User),
+      userId: String(raw?.userId || docSnap?.id || ''),
+    } as User;
+  }
+
+  private async getSearchUserPool(forceRefresh = false): Promise<User[]> {
+    const now = Date.now();
+    if (!forceRefresh && this.searchUsersCache && this.searchUsersCache.expiresAt > now) {
+      return this.searchUsersCache.users;
+    }
+
+    const usersRef = collection(db, 'users');
+    const users: User[] = [];
+    let lastDoc: any = null;
+
+    while (users.length < USER_SEARCH_SCAN_MAX_DOCS) {
+      let q = query(usersRef, orderBy(documentId()), limit(USER_SEARCH_SCAN_PAGE_SIZE));
+      if (lastDoc) {
+        q = query(usersRef, orderBy(documentId()), startAfter(lastDoc), limit(USER_SEARCH_SCAN_PAGE_SIZE));
+      }
+
+      const snapshot = await getDocs(q);
+      if (snapshot.empty) break;
+
+      snapshot.docs.forEach((docSnap) => {
+        users.push(this.normalizeUserFromDoc(docSnap));
+      });
+
+      lastDoc = snapshot.docs[snapshot.docs.length - 1];
+      if (!lastDoc || snapshot.docs.length < USER_SEARCH_SCAN_PAGE_SIZE) break;
+    }
+
+    this.searchUsersCache = {
+      users,
+      expiresAt: now + USER_SEARCH_CACHE_TTL_MS,
+    };
+
+    return users;
+  }
+
+  private async refreshUserInBackground(userIdOrUsername: string) {
+    await cacheIntegration.scheduleBackgroundRefresh(`user:${userIdOrUsername}`, async () => {
+      const userRef = doc(db, 'users', userIdOrUsername);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        const user = { ...userSnap.data(), userId: userSnap.id } as User;
+        await cacheIntegration.cacheUser(user.userId, user);
+        if (user.username) {
+          await cacheIntegration.cacheUser(user.username.toLowerCase(), user);
+        }
+        await cacheIntegration.warmUserAssets(user);
+      }
+    }, 12000);
+  }
+
   // ==========================================
   // USER CRUD OPERATIONS
   // ==========================================
@@ -58,62 +129,57 @@ export class UserService {
       updatedAt: serverTimestamp(),
     });
   }
-
   /**
    * Get user by ID or username
    * With caching (1 hour TTL)
    */
   async getUser(userIdOrUsername: string): Promise<User | null> {
     try {
-      // Try cache first
-      const cacheKey = `${STORAGE_KEYS.USER_SPECIFIC.CACHED_PROFILE}${userIdOrUsername}`;
-      const cached = storageService.getSharedData<User>(cacheKey);
-      
+      const lookup = userIdOrUsername.trim();
+      const cached = await cacheIntegration.getCachedUser(lookup);
       if (cached) {
-        console.log('⚡ Profile loaded from cache:', cached.username);
-        return cached;
+        void this.refreshUserInBackground(lookup);
+        void cacheIntegration.warmUserAssets(cached as User);
+        return cached as User;
       }
-      
-      // Try by userId first
-      const userRef = doc(db, 'users', userIdOrUsername);
+
+      const userRef = doc(db, 'users', lookup);
       const userSnap = await getDoc(userRef);
 
       if (userSnap.exists()) {
         const user = { ...userSnap.data(), userId: userSnap.id } as User;
-        
-        // Cache for 1 hour
-        storageService.setSharedData(cacheKey, user);
-        console.log('💾 Profile cached:', user.username);
-        
+        await cacheIntegration.cacheUser(user.userId, user);
+        if (user.username) {
+          await cacheIntegration.cacheUser(user.username.toLowerCase(), user);
+        }
+        await cacheIntegration.warmUserAssets(user);
         return user;
       }
 
-      // Try by username with multiple fallbacks
       const usersRef = collection(db, 'users');
-      
-      // Try usernameLowercase (for new users)
-      let q = query(usersRef, where('usernameLowercase', '==', userIdOrUsername.toLowerCase()), limit(1));
+      let q = query(usersRef, where('usernameLowercase', '==', lookup.toLowerCase()), limit(1));
       let snapshot = await getDocs(q);
       if (!snapshot.empty) {
         const user = { ...snapshot.docs[0].data(), userId: snapshot.docs[0].id } as User;
-        
-        // Cache username lookup
-        storageService.setSharedData(cacheKey, user);
-        console.log('💾 Profile cached (username lookup):', user.username);
-        
+        await cacheIntegration.cacheUser(user.userId, user);
+        await cacheIntegration.cacheUser(lookup, user);
+        if (user.username) {
+          await cacheIntegration.cacheUser(user.username.toLowerCase(), user);
+        }
+        await cacheIntegration.warmUserAssets(user);
         return user;
       }
 
-      // Try username field (for existing users)
-      q = query(usersRef, where('username', '==', userIdOrUsername.toLowerCase()), limit(1));
+      q = query(usersRef, where('username', '==', lookup.toLowerCase()), limit(1));
       snapshot = await getDocs(q);
       if (!snapshot.empty) {
         const user = { ...snapshot.docs[0].data(), userId: snapshot.docs[0].id } as User;
-        
-        // Cache username lookup
-        storageService.setSharedData(cacheKey, user);
-        console.log('💾 Profile cached (legacy username):', user.username);
-        
+        await cacheIntegration.cacheUser(user.userId, user);
+        await cacheIntegration.cacheUser(lookup, user);
+        if (user.username) {
+          await cacheIntegration.cacheUser(user.username.toLowerCase(), user);
+        }
+        await cacheIntegration.warmUserAssets(user);
         return user;
       }
 
@@ -122,6 +188,61 @@ export class UserService {
       console.error('Error fetching user:', error);
       return null;
     }
+  }
+
+  async getUsersByIds(userIds: string[]): Promise<Record<string, User>> {
+    const uniqueIds = Array.from(new Set((userIds || []).filter((id) => typeof id === 'string' && id.trim().length > 0)));
+    if (uniqueIds.length === 0) return {};
+
+    const usersById: Record<string, User> = {};
+    const missingIds: string[] = [];
+
+    const cachedUsers = await Promise.all(
+      uniqueIds.map(async (userId) => {
+        try {
+          const cached = await cacheIntegration.getCachedUser(userId);
+          return { userId, user: cached as User | null };
+        } catch {
+          return { userId, user: null };
+        }
+      })
+    );
+
+    cachedUsers.forEach(({ userId, user }) => {
+      if (user?.userId) {
+        usersById[userId] = user;
+      } else {
+        missingIds.push(userId);
+      }
+    });
+
+    if (missingIds.length === 0) {
+      return usersById;
+    }
+
+    const usersRef = collection(db, 'users');
+    for (let index = 0; index < missingIds.length; index += 10) {
+      const chunk = missingIds.slice(index, index + 10);
+      if (chunk.length === 0) continue;
+
+      try {
+        const q = query(usersRef, where(documentId(), 'in', chunk));
+        const snapshot = await getDocs(q);
+        snapshot.docs.forEach((docSnap) => {
+          const user = { ...docSnap.data(), userId: docSnap.id } as User;
+          usersById[user.userId] = user;
+          void cacheIntegration.cacheUser(user.userId, user);
+          if (typeof user.username === 'string' && user.username.length > 0) {
+            void cacheIntegration.cacheUser(user.username.toLowerCase(), user);
+          }
+          void cacheIntegration.warmUserAssets(user);
+        });
+      } catch (error) {
+        console.error('Batch user fetch chunk failed:', error);
+      }
+    }
+
+    return usersById;
   }
 
   /**
@@ -146,6 +267,23 @@ export class UserService {
       updatedAt: serverTimestamp(),
     });
 
+    // Bust stale profile cache immediately so UI reflects updates without app restart.
+    try {
+      await cacheIntegration.invalidateUser(userId);
+      const freshSnap = await getDoc(userRef);
+      if (freshSnap.exists()) {
+        const freshUser = { ...freshSnap.data(), userId } as User;
+        await cacheIntegration.cacheUser(userId, freshUser);
+
+        const username = (freshUser as any)?.username;
+        if (typeof username === 'string' && username.trim().length > 0) {
+          await cacheIntegration.cacheUser(username.toLowerCase(), freshUser);
+        }
+      }
+    } catch (cacheError) {
+      console.warn('Failed to refresh user cache after update:', cacheError);
+    }
+
     // If avatar is being updated, update all posts and stories
     if (updates.avatarURL !== undefined) {
       await this.updateUserContentAvatar(userId, updates.avatarURL);
@@ -156,47 +294,57 @@ export class UserService {
    * Update user's avatar in all their posts and stories
    */
   async updateUserContentAvatar(userId: string, newAvatarURL: string): Promise<void> {
-    const batch = writeBatch(db);
-    let updateCount = 0;
-
     try {
-      // Update all posts
+      let total = 0;
+
       const postsRef = collection(db, 'posts');
       const postsQuery = query(postsRef, where('authorId', '==', userId));
       const postsSnapshot = await getDocs(postsQuery);
+      if (!postsSnapshot.empty) {
+        const batchPosts = writeBatch(db);
+        postsSnapshot.docs.forEach((postDoc) => {
+          const data = postDoc.data() as any;
+          if (data?.authorId === userId) {
+            batchPosts.update(postDoc.ref, { authorAvatarURL: newAvatarURL });
+          }
+        });
+        await batchPosts.commit();
+        total += postsSnapshot.size;
+      }
 
-      postsSnapshot.docs.forEach((doc) => {
-        batch.update(doc.ref, { authorAvatarURL: newAvatarURL });
-        updateCount++;
-      });
-
-      // Update all stories
       const storiesRef = collection(db, 'stories');
       const storiesQuery = query(storiesRef, where('authorId', '==', userId));
       const storiesSnapshot = await getDocs(storiesQuery);
+      if (!storiesSnapshot.empty) {
+        const batchStories = writeBatch(db);
+        storiesSnapshot.docs.forEach((storyDoc) => {
+          batchStories.update(storyDoc.ref, { authorAvatarURL: newAvatarURL });
+        });
+        await batchStories.commit();
+        total += storiesSnapshot.size;
+      }
 
-      storiesSnapshot.docs.forEach((doc) => {
-        batch.update(doc.ref, { authorAvatarURL: newAvatarURL });
-        updateCount++;
-      });
-
-      // Update all comments
       const commentsRef = collection(db, 'comments');
       const commentsQuery = query(commentsRef, where('authorId', '==', userId));
       const commentsSnapshot = await getDocs(commentsQuery);
+      if (!commentsSnapshot.empty) {
+        try {
+          const batchComments = writeBatch(db);
+          commentsSnapshot.docs.forEach((commentDoc) => {
+            batchComments.update(commentDoc.ref, { authorAvatarURL: newAvatarURL });
+          });
+          await batchComments.commit();
+          total += commentsSnapshot.size;
+        } catch (e) {
+          console.error('Failed to update avatar in comments:', e);
+        }
+      }
 
-      commentsSnapshot.docs.forEach((doc) => {
-        batch.update(doc.ref, { authorAvatarURL: newAvatarURL });
-        updateCount++;
-      });
-
-      if (updateCount > 0) {
-        await batch.commit();
-        console.log(`Updated avatar in ${updateCount} content items`);
+      if (total > 0) {
+        console.log(`Updated avatar in ${total} content items`);
       }
     } catch (error) {
       console.error('Failed to update user content avatar:', error);
-      // Don't throw error - avatar update in profile succeeded
     }
   }
 
@@ -208,42 +356,93 @@ export class UserService {
       return [];
     }
 
-    const usersRef = collection(db, 'users');
     const searchLower = searchTerm.toLowerCase().trim();
-    
+
+    const scoreText = (text: string): number => {
+      const value = String(text || '').toLowerCase().trim();
+      if (!value) return 0;
+      if (value === searchLower) return 1200;
+      if (value.startsWith(searchLower)) return 900;
+
+      const parts = value.split(/[^a-z0-9_]+/).filter(Boolean);
+      if (parts.some((part) => part.startsWith(searchLower))) return 700;
+      if (searchLower.length >= 2 && value.includes(searchLower)) return 220;
+      return 0;
+    };
+
+    const rankUsers = (users: User[]): User[] => {
+      return users
+        .map((user) => {
+          const username = String(user.username || (user as any).usernameLowercase || '').toLowerCase();
+          const displayName = String(user.displayName || (user as any).displayNameLowercase || '').toLowerCase();
+          const usernameScore = scoreText(username);
+          const displayScore = scoreText(displayName);
+          const matchScore = Math.max(usernameScore, displayScore);
+          return {
+            user,
+            matchScore,
+            followers: Number(user?.stats?.followersCount || 0),
+            username,
+          };
+        })
+        .filter((entry) => entry.matchScore > 0)
+        .sort((a, b) => {
+          if (a.matchScore !== b.matchScore) return b.matchScore - a.matchScore;
+          if (a.followers !== b.followers) return b.followers - a.followers;
+          return a.username.localeCompare(b.username);
+        })
+        .slice(0, limitCount)
+        .map((entry) => entry.user);
+    };
+
+    const mergeUniqueUsers = (...groups: User[][]): User[] => {
+      const merged = new Map<string, User>();
+      groups.flat().forEach((user) => {
+        const userId = String(user?.userId || '').trim();
+        if (!userId || merged.has(userId)) return;
+        merged.set(userId, user);
+      });
+      return Array.from(merged.values());
+    };
+
+    const collectPrefixMatches = async (): Promise<User[]> => {
+      const usersRef = collection(db, 'users');
+      const prefixLimit = Math.max(limitCount * 2, 24);
+
+      const usernameQuery = getDocs(
+        query(
+          usersRef,
+          orderBy('usernameLowercase'),
+          where('usernameLowercase', '>=', searchLower),
+          where('usernameLowercase', '<=', `${searchLower}\uf8ff`),
+          limit(prefixLimit)
+        )
+      ).catch(() => null);
+
+      const displayNameQuery = getDocs(
+        query(
+          usersRef,
+          orderBy('displayNameLowercase'),
+          where('displayNameLowercase', '>=', searchLower),
+          where('displayNameLowercase', '<=', `${searchLower}\uf8ff`),
+          limit(prefixLimit)
+        )
+      ).catch(() => null);
+
+      const [usernameSnapshot, displayNameSnapshot] = await Promise.all([usernameQuery, displayNameQuery]);
+      const usernameMatches = usernameSnapshot?.docs?.map((docSnap) => this.normalizeUserFromDoc(docSnap)) || [];
+      const displayNameMatches = displayNameSnapshot?.docs?.map((docSnap) => this.normalizeUserFromDoc(docSnap)) || [];
+      return mergeUniqueUsers(usernameMatches, displayNameMatches);
+    };
+
     try {
-      // Get all users and filter client-side for better search
-      const snapshot = await getDocs(query(usersRef, limit(100)));
-      const allUsers = snapshot.docs.map((doc) => doc.data() as User);
-      
-      // Filter users that match username or displayName
-      const matchedUsers = allUsers.filter(user => {
-        const username = (user.username || '').toLowerCase();
-        const displayName = (user.displayName || '').toLowerCase();
-        return username.includes(searchLower) || displayName.includes(searchLower);
-      });
-      
-      // Sort by relevance (exact matches first, then starts with, then contains)
-      matchedUsers.sort((a, b) => {
-        const aUsername = (a.username || '').toLowerCase();
-        const bUsername = (b.username || '').toLowerCase();
-        const aDisplay = (a.displayName || '').toLowerCase();
-        const bDisplay = (b.displayName || '').toLowerCase();
-        
-        // Exact match
-        if (aUsername === searchLower) return -1;
-        if (bUsername === searchLower) return 1;
-        
-        // Starts with
-        if (aUsername.startsWith(searchLower) && !bUsername.startsWith(searchLower)) return -1;
-        if (bUsername.startsWith(searchLower) && !aUsername.startsWith(searchLower)) return 1;
-        if (aDisplay.startsWith(searchLower) && !bDisplay.startsWith(searchLower)) return -1;
-        if (bDisplay.startsWith(searchLower) && !aDisplay.startsWith(searchLower)) return 1;
-        
-        return 0;
-      });
-      
-      return matchedUsers.slice(0, limitCount);
+      const prefixMatches = await collectPrefixMatches();
+      if (prefixMatches.length >= limitCount) {
+        return rankUsers(prefixMatches);
+      }
+
+      const poolMatches = rankUsers(await this.getSearchUserPool(prefixMatches.length === 0));
+      return rankUsers(mergeUniqueUsers(prefixMatches, poolMatches));
     } catch (error) {
       console.error('Search users error:', error);
       return [];
@@ -263,6 +462,75 @@ export class UserService {
     } catch (error) {
       // Silently fail - this is a non-critical background operation
       console.log('Failed to update online status:', error);
+    }
+  }
+
+  /**
+   * Get active/online users
+   * Uses a single recent-activity query and a short-lived in-memory cache to avoid
+   * the old online->fallback double fetch pattern on every focus/render cycle.
+   */
+  async getActiveUsers(excludeUserId?: string, limitCount: number = 20): Promise<User[]> {
+    const cacheKey = `${excludeUserId || 'all'}:${limitCount}`;
+    const cached = this.activeUsersCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.users;
+    }
+
+    try {
+      const usersRef = collection(db, 'users');
+      const recentThreshold = Timestamp.fromDate(new Date(Date.now() - ACTIVE_USERS_WINDOW_MS));
+      const q = query(
+        usersRef,
+        where('lastSeen', '>=', recentThreshold),
+        orderBy('lastSeen', 'desc'),
+        limit(limitCount + (excludeUserId ? 1 : 0))
+      );
+
+      const snapshot = await getDocs(q);
+      const activeUsers = snapshot.docs
+        .map(doc => ({ userId: doc.id, ...doc.data() }))
+        .filter(u => (excludeUserId ? u.userId !== excludeUserId : true))
+        .slice(0, limitCount) as User[];
+
+      this.activeUsersCache.set(cacheKey, {
+        users: activeUsers,
+        expiresAt: Date.now() + ACTIVE_USERS_CACHE_TTL_MS,
+      });
+
+      console.log(`Found ${activeUsers.length} active users`);
+      return activeUsers;
+    } catch (error) {
+      console.error('Failed to get active users:', error);
+      return cached?.users || [];
+    }
+  }
+
+
+  /**
+   * Get recently active users (online in last 5 minutes)
+   */
+  async getRecentlyActiveUsers(excludeUserId?: string, limitCount: number = 20): Promise<User[]> {
+    try {
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+      const usersRef = collection(db, 'users');
+      const q = query(
+        usersRef,
+        where('lastSeen', '>=', Timestamp.fromDate(fiveMinutesAgo)),
+        orderBy('lastSeen', 'desc'),
+        limit(limitCount)
+      );
+      
+      const snapshot = await getDocs(q);
+      const recentUsers = snapshot.docs
+        .map(doc => ({ userId: doc.id, ...doc.data() }))
+        .filter(u => excludeUserId ? u.userId !== excludeUserId : true) as User[];
+      
+      console.log(`Ã¢ÂÂ° Found ${recentUsers.length} recently active users`);
+      return recentUsers;
+    } catch (error) {
+      console.error('Failed to get recently active users:', error);
+      return [];
     }
   }
 
@@ -287,16 +555,36 @@ export class UserService {
    */
   async muteUser(userId: string, mutedUserId: string): Promise<void> {
     const userRef = doc(db, 'users', userId);
+    const mutedRef = doc(db, `users/${userId}/mutedUsers/${mutedUserId}`);
     const userDoc = await getDoc(userRef);
-    
-    if (userDoc.exists()) {
-      const mutedUsers = userDoc.data().mutedUsers || [];
-      await updateDoc(userRef, {
-        mutedUsers: [...new Set([...mutedUsers, mutedUserId])],
-      });
-    }
+    const mutedUsers = Array.isArray(userDoc.data()?.mutedUsers) ? userDoc.data()?.mutedUsers : [];
+
+    const batch = writeBatch(db);
+    batch.set(mutedRef, {
+      userId: mutedUserId,
+      mutedAt: serverTimestamp(),
+    });
+    batch.update(userRef, {
+      mutedUsers: [...new Set([...mutedUsers, mutedUserId])],
+    });
+
+    await batch.commit();
   }
 
+  async unmuteUser(userId: string, mutedUserId: string): Promise<void> {
+    const userRef = doc(db, 'users', userId);
+    const mutedRef = doc(db, `users/${userId}/mutedUsers/${mutedUserId}`);
+    const userDoc = await getDoc(userRef);
+    const mutedUsers = Array.isArray(userDoc.data()?.mutedUsers) ? userDoc.data()?.mutedUsers : [];
+
+    const batch = writeBatch(db);
+    batch.delete(mutedRef);
+    batch.update(userRef, {
+      mutedUsers: mutedUsers.filter((id: string) => id !== mutedUserId),
+    });
+
+    await batch.commit();
+  }
   // ==========================================
   // FOLLOW OPERATIONS
   // ==========================================
@@ -305,97 +593,110 @@ export class UserService {
    * Follow a user
    */
   async followUser(followerId: string, followingId: string): Promise<void> {
-    // Check if already following to prevent duplicates
-    const followingRef = doc(db, `users/${followerId}/following/${followingId}`);
-    const followingSnap = await getDoc(followingRef);
-    
-    if (followingSnap.exists()) {
-      // Already following, don't increment again
-      return;
-    }
+    const targetUser = await this.getUser(followingId);
 
-    // Add to follower's following list
-    await setDoc(followingRef, {
-      userId: followingId,
-      followedAt: serverTimestamp(),
-      notificationsEnabled: true,
+    await cacheIntegration.runOptimisticFollowMutation({
+      followerId,
+      targetUserId: followingId,
+      targetUsername: targetUser?.username,
+      isFollowing: true,
+      throttleMs: 180,
+      retries: 2,
+      execute: async () => {
+        await runTransaction(db, async (tx) => {
+          const followingRef = doc(db, `users/${followerId}/following/${followingId}`);
+          const followerRef = doc(db, `users/${followingId}/followers/${followerId}`);
+          const followerUserRef = doc(db, 'users', followerId);
+          const followingUserRef = doc(db, 'users', followingId);
+          const existing = await tx.get(followingRef);
+          if (existing.exists()) return;
+
+          tx.set(followingRef, {
+            userId: followingId,
+            followedAt: serverTimestamp(),
+            notificationsEnabled: true,
+          });
+          tx.set(followerRef, {
+            userId: followerId,
+            followedAt: serverTimestamp(),
+            isCloseFriend: false,
+          });
+          tx.update(followerUserRef, {
+            'stats.followingCount': increment(1),
+          });
+          tx.update(followingUserRef, {
+            'stats.followersCount': increment(1),
+          });
+        });
+      },
+      revalidate: async () => {
+        await this.refreshUserInBackground(followerId);
+        await this.refreshUserInBackground(followingId);
+      },
     });
 
-    // Add to following's followers list
-    const followerRef = doc(db, `users/${followingId}/followers/${followerId}`);
-    await setDoc(followerRef, {
-      userId: followerId,
-      followedAt: serverTimestamp(),
-      isCloseFriend: false,
-    });
-
-    // Update follower count
-    const followerUserRef = doc(db, 'users', followerId);
-    await updateDoc(followerUserRef, {
-      'stats.followingCount': increment(1),
-    });
-
-    // Update following count
-    const followingUserRef = doc(db, 'users', followingId);
-    await updateDoc(followingUserRef, {
-      'stats.followersCount': increment(1),
-    });
-
-    // Create follow notification with user details
-    const followerUser = await this.getUser(followerId);
-    
-    if (followerUser) {
-      const { notificationService } = await import('./notification.service');
-      await notificationService.notifyFollow(
-        followingId,
-        followerId,
-        followerUser.username,
-        followerUser.avatarURL || ''
-      );
-    }
+    void (async () => {
+      try {
+        const followerUser = await this.getUser(followerId);
+        if (!followerUser) return;
+        const { notificationService } = await import('./notification.service');
+        await notificationService.notifyFollow(
+          followingId,
+          followerId,
+          followerUser.username,
+          followerUser.avatarURL || ''
+        );
+      } catch (error) {
+        console.error('Failed to create follow notification:', error);
+      }
+    })();
   }
 
   /**
    * Unfollow a user
    */
   async unfollowUser(followerId: string, followingId: string): Promise<void> {
-    const batch = writeBatch(db);
+    const targetUser = await this.getUser(followingId);
 
-    // Remove from follower's following list
-    const followingRef = doc(db, `users/${followerId}/following/${followingId}`);
-    batch.delete(followingRef);
+    await cacheIntegration.runOptimisticFollowMutation({
+      followerId,
+      targetUserId: followingId,
+      targetUsername: targetUser?.username,
+      isFollowing: false,
+      throttleMs: 180,
+      retries: 2,
+      execute: async () => {
+        await runTransaction(db, async (tx) => {
+          const followingRef = doc(db, `users/${followerId}/following/${followingId}`);
+          const followerRef = doc(db, `users/${followingId}/followers/${followerId}`);
+          const followerUserRef = doc(db, 'users', followerId);
+          const followingUserRef = doc(db, 'users', followingId);
+          const [existingSnap, followerDoc, followingDoc] = await Promise.all([
+            tx.get(followingRef),
+            tx.get(followerUserRef),
+            tx.get(followingUserRef),
+          ]);
+          if (!existingSnap.exists()) return;
 
-    // Remove from following's followers list
-    const followerRef = doc(db, `users/${followingId}/followers/${followerId}`);
-    batch.delete(followerRef);
+          const currentFollowingCount = Number(followerDoc.data()?.stats?.followingCount || 0);
+          const currentFollowersCount = Number(followingDoc.data()?.stats?.followersCount || 0);
 
-    // Update counts safely (prevent negative)
-    const followerUserRef = doc(db, 'users', followerId);
-    const followerDoc = await getDoc(followerUserRef);
-    const currentFollowingCount = followerDoc.data()?.stats?.followingCount || 0;
-    
-    if (currentFollowingCount > 0) {
-      batch.update(followerUserRef, {
-        'stats.followingCount': increment(-1),
-      });
-    }
-
-    const followingUserRef = doc(db, 'users', followingId);
-    const followingDoc = await getDoc(followingUserRef);
-    const currentFollowersCount = followingDoc.data()?.stats?.followersCount || 0;
-    
-    if (currentFollowersCount > 0) {
-      batch.update(followingUserRef, {
-        'stats.followersCount': increment(-1),
-      });
-    }
-
-    await batch.commit();
+          tx.delete(followingRef);
+          tx.delete(followerRef);
+          tx.update(followerUserRef, {
+            'stats.followingCount': increment(currentFollowingCount > 0 ? -1 : 0),
+          });
+          tx.update(followingUserRef, {
+            'stats.followersCount': increment(currentFollowersCount > 0 ? -1 : 0),
+          });
+        });
+      },
+      revalidate: async () => {
+        await this.refreshUserInBackground(followerId);
+        await this.refreshUserInBackground(followingId);
+      },
+    });
   }
-
-  /**
-   * Send follow request to private account
-   */
   async sendFollowRequest(requesterId: string, targetUserId: string): Promise<void> {
     const requestRef = doc(db, `users/${targetUserId}/followRequests/${requesterId}`);
     const requesterUser = await this.getUser(requesterId);
@@ -509,6 +810,12 @@ export class UserService {
     }, 5 * 60 * 1000); // Cache for 5 minutes
   }
 
+  async isFollowingUser(followerId: string, targetUserId: string): Promise<boolean> {
+    const followingRef = doc(db, `users/${followerId}/following/${targetUserId}`);
+    const followingSnap = await getDoc(followingRef);
+    return followingSnap.exists();
+  }
+
   // ==========================================
   // CLOSE FRIENDS
   // ==========================================
@@ -523,11 +830,17 @@ export class UserService {
       addedAt: serverTimestamp(),
     });
 
-    // Update follower record
-    const followerRef = doc(db, `users/${userId}/followers/${friendId}`);
-    await updateDoc(followerRef, {
-      isCloseFriend: true,
-    });
+    try {
+      const followerRef = doc(db, `users/${userId}/followers/${friendId}`);
+      const followerSnap = await getDoc(followerRef);
+      if (followerSnap.exists()) {
+        await updateDoc(followerRef, {
+          isCloseFriend: true,
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to mirror close friend status on follower record:', error);
+    }
   }
 
   /**
@@ -537,11 +850,17 @@ export class UserService {
     const closeFriendRef = doc(db, `users/${userId}/closeFriends/${friendId}`);
     await deleteDoc(closeFriendRef);
 
-    // Update follower record
-    const followerRef = doc(db, `users/${userId}/followers/${friendId}`);
-    await updateDoc(followerRef, {
-      isCloseFriend: false,
-    });
+    try {
+      const followerRef = doc(db, `users/${userId}/followers/${friendId}`);
+      const followerSnap = await getDoc(followerRef);
+      if (followerSnap.exists()) {
+        await updateDoc(followerRef, {
+          isCloseFriend: false,
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to clear close friend status on follower record:', error);
+    }
   }
 
   /**
@@ -733,9 +1052,17 @@ export class UserService {
    * Get list of muted users
    */
   async getMutedUsers(userId: string): Promise<string[]> {
-    const mutedRef = collection(db, `users/${userId}/mutedUsers`);
-    const snapshot = await getDocs(mutedRef);
-    return snapshot.docs.map(doc => doc.data().userId || doc.id);
+    const [snapshot, userDoc] = await Promise.all([
+      getDocs(collection(db, `users/${userId}/mutedUsers`)),
+      getDoc(doc(db, 'users', userId)),
+    ]);
+
+    const fromCollection = snapshot.docs.map((entry) => entry.data().userId || entry.id);
+    const fromUserDoc = Array.isArray(userDoc.data()?.mutedUsers) ? userDoc.data()?.mutedUsers : [];
+
+    return Array.from(new Set([...fromCollection, ...fromUserDoc])).filter(
+      (id): id is string => typeof id === 'string' && id.length > 0
+    );
   }
 
   /**
@@ -841,7 +1168,67 @@ export class UserService {
 
     return { valid: true };
   }
+
+  /**
+   * Check if user is following another user
+   */
+  async isFollowing(userId: string, targetUserId: string): Promise<boolean> {
+    try {
+      const followingRef = doc(db, 'users', userId, 'following', targetUserId);
+      const followingSnap = await getDoc(followingRef);
+      return followingSnap.exists();
+    } catch (error) {
+      console.error('Error checking follow status:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get mutual followers between two users
+   */
+  async getMutualFollowers(userId: string, targetUserId: string): Promise<string[]> {
+    try {
+      // Get current user's following
+      const userFollowing = await this.getFollowing(userId);
+      
+      // Get target user's followers
+      const targetFollowers = await this.getFollowers(targetUserId);
+      
+      // Find intersection (mutual followers)
+      const mutualFollowers = userFollowing.filter(followingId => 
+        targetFollowers.includes(followingId)
+      );
+      
+      return mutualFollowers;
+    } catch (error) {
+      console.error('Error getting mutual followers:', error);
+      return [];
+    }
+  }
 }
 
 // Export singleton instance
 export const userService = new UserService();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,7 +1,13 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = 'https://shaqlzwarwjeozjtugdo.supabase.co';
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoYXFsendhcndqZW96anR1Z2RvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk0NzYwNzUsImV4cCI6MjA3NTA1MjA3NX0.3L-e6nEZp9owu91rUpcj6VVPzGQrPTCEEKNNq2U56Fg';
+const supabaseUrl =
+  process.env.EXPO_PUBLIC_SUPABASE_URL ??
+  process.env.NEXT_PUBLIC_SUPABASE_URL ??
+  'https://phnhiegifgjhblqaojsg.supabase.co';
+const supabaseKey =
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ??
+  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY ??
+  'sb_publishable_D7Ejll7Zf4XDyZH5UNBp3A_oVLISjg4';
 
 // Initialize Supabase client
 export const supabase = createClient(supabaseUrl, supabaseKey, {
@@ -12,7 +18,10 @@ export const supabase = createClient(supabaseUrl, supabaseKey, {
 });
 
 // CDN URL for optimized media delivery
-const cdnUrl = 'https://cdn.supabase.co/shaqlzwarwjeozjtugdo';
+const cdnUrl =
+  process.env.EXPO_PUBLIC_SUPABASE_CDN_URL ??
+  process.env.NEXT_PUBLIC_SUPABASE_CDN_URL ??
+  undefined;
 
 /**
  * Get media URL with optional CDN
@@ -21,7 +30,7 @@ const cdnUrl = 'https://cdn.supabase.co/shaqlzwarwjeozjtugdo';
  * @returns Full URL to media file
  */
 export const getMediaUrl = (path: string, useCDN = false): string => {
-  if (useCDN) {
+  if (useCDN && cdnUrl) {
     return `${cdnUrl}/storage/v1/object/public/${path}`;
   }
   return `${supabaseUrl}/storage/v1/object/public/${path}`;

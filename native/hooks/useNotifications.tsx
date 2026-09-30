@@ -7,13 +7,14 @@ import { useAuth } from '../contexts/AuthContext';
 
 export const useNotifications = () => {
   const { user } = useAuth();
+  const currentUserId = user?.userId ?? null;
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!user) return;
+    if (!currentUserId) return;
 
     setLoading(true);
 
@@ -21,7 +22,7 @@ export const useNotifications = () => {
     const notificationsRef = collection(db, 'notifications');
     const q = query(
       notificationsRef,
-      where('userId', '==', user.userId),
+      where('userId', '==', currentUserId),
       where('type', '!=', 'dm'),
       orderBy('type'),
       orderBy('createdAt', 'desc')
@@ -61,7 +62,7 @@ export const useNotifications = () => {
     return () => {
       unsubscribe();
     };
-  }, [user]);
+  }, [currentUserId]);
 
   const markAsRead = async (notificationId: string) => {
     try {
@@ -77,10 +78,10 @@ export const useNotifications = () => {
   };
 
   const markAllAsRead = async () => {
-    if (!user) return;
+    if (!currentUserId) return;
     
     try {
-      await notificationService.markAllAsRead(user.userId);
+      await notificationService.markAllAsRead(currentUserId);
       setNotifications((prev) =>
         prev.map((notif) => ({ ...notif, isRead: true }))
       );

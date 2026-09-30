@@ -42,7 +42,10 @@ export class SearchService {
     );
 
     const snapshot = await getDocs(usernameQuery);
-    return snapshot.docs.map((doc) => doc.data() as User);
+    return snapshot.docs.map((docSnap) => ({
+      ...(docSnap.data() as User),
+      userId: String((docSnap.data() as any)?.userId || docSnap.id),
+    } as User));
   }
 
   /**
@@ -101,7 +104,7 @@ export class SearchService {
     const snapshot = await getDocs(q);
 
     return {
-      posts: snapshot.docs.map((doc) => doc.data() as Post),
+      posts: snapshot.docs.map((docSnap) => ({ ...(docSnap.data() as Post), postId: String((docSnap.data() as any)?.postId || docSnap.id) } as Post)),
       lastDoc: snapshot.docs[snapshot.docs.length - 1] || null,
     };
   }
@@ -144,6 +147,57 @@ export class SearchService {
     return sorted;
   }
 
+  /**
+   * Search hashtags by query term
+   * Returns hashtag objects with postsCount and trending status
+   */
+  async searchHashtags(
+    searchTerm: string,
+    limitCount = 20
+  ): Promise<Array<{ hashtag: string; postsCount: number; trending: boolean }>> {
+    if (!searchTerm || searchTerm.length < 1) {
+      return [];
+    }
+
+    const cleanQuery = searchTerm.replace('#', '').toLowerCase();
+
+    // Get trending hashtags to determine trending status
+    const trending = await this.getTrendingHashtags(20);
+    const trendingTags = new Set(trending.map(t => t.tag.replace('#', '').toLowerCase()));
+
+    // Search recent posts for matching hashtags
+    const postsRef = collection(db, 'posts');
+    const hashtagQuery = query(
+      postsRef,
+      orderBy('createdAt', 'desc'),
+      limit(200) // Sample more posts for better hashtag coverage
+    );
+
+    const snapshot = await getDocs(hashtagQuery);
+    const hashtagCounts = new Map<string, number>();
+
+    snapshot.docs.forEach((doc) => {
+      const post = doc.data() as Post;
+      post.tags?.forEach((tag) => {
+        if (tag.toLowerCase().includes(cleanQuery)) {
+          hashtagCounts.set(tag.toLowerCase(), (hashtagCounts.get(tag.toLowerCase()) || 0) + 1);
+        }
+      });
+    });
+
+    // Convert to result array
+    const results = Array.from(hashtagCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limitCount)
+      .map(([tag, count]) => ({
+        hashtag: tag,
+        postsCount: count,
+        trending: trendingTags.has(tag),
+      }));
+
+    return results;
+  }
+
   // ==========================================
   // POST SEARCH
   // ==========================================
@@ -161,7 +215,7 @@ export class SearchService {
     }
 
     const postsRef = collection(db, 'posts');
-    
+
     // If search term starts with #, search hashtags
     if (searchTerm.startsWith('#')) {
       return this.searchHashtag(searchTerm, limitCount, lastDoc);
@@ -186,7 +240,7 @@ export class SearchService {
     const snapshot = await getDocs(q);
 
     return {
-      posts: snapshot.docs.map((doc) => doc.data() as Post),
+      posts: snapshot.docs.map((docSnap) => ({ ...(docSnap.data() as Post), postId: String((docSnap.data() as any)?.postId || docSnap.id) } as Post)),
       lastDoc: snapshot.docs[snapshot.docs.length - 1] || null,
     };
   }
@@ -219,7 +273,7 @@ export class SearchService {
     }
 
     const snapshot = await getDocs(q);
-    return snapshot.docs.map((doc) => doc.data() as Post);
+    return snapshot.docs.map((docSnap) => ({ ...(docSnap.data() as Post), postId: String((docSnap.data() as any)?.postId || docSnap.id) } as Post));
   }
 
   // ==========================================
@@ -250,7 +304,7 @@ export class SearchService {
     );
 
     const snapshot = await getDocs(q);
-    return snapshot.docs.map((doc) => doc.data() as Post);
+    return snapshot.docs.map((docSnap) => ({ ...(docSnap.data() as Post), postId: String((docSnap.data() as any)?.postId || docSnap.id) } as Post));
   }
 
   // ==========================================
@@ -267,7 +321,7 @@ export class SearchService {
 
     // Remove if already exists
     const filtered = searches.filter(s => s !== searchTerm);
-    
+
     // Add to beginning
     filtered.unshift(searchTerm);
 

@@ -1,0 +1,34 @@
+/* Fix for Ionicons rendering on web */
+@import url('https://unpkg.com/ionicons@7.1.0/dist/ionicons/ionicons.css');
+
+/* Hide empty Ionicons divs */
+div[style*="font-family: ionicons"]:empty {
+  display: none !important;
+}
+
+/* Ensure Ionicons render properly */
+.ionicon {
+  display: inline-block !important;
+  font-family: 'Ionicons' !important;
+}
+
+/* Fix for React Native Web Ionicons */
+[data-testid*="ionicon"],
+[class*="ionicon"] {
+  font-family: 'Ionicons' !important;
+  font-style: normal !important;
+  font-weight: normal !important;
+  display: inline-block !important;
+}
+
+/* Hide broken icon containers */
+div.css-text-146c3p1[style*="font-family: ionicons"],
+div[style*="font-family: ionicons"][style*="font-size: 24px"],
+div[style*="font-family: ionicons"][style*="font-size: 25px"],
+div[dir="auto"][class*="css-text"][style*="font-family: ionicons"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  width: 0 !important;
+  height: 0 !important;
+}

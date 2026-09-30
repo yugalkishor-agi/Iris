@@ -1,23 +1,16 @@
-import React, { useState, useEffect, useRef } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TextInput,
-  TouchableOpacity,
-  Image,
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
-} from 'react-native';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, ActivityIndicator, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { useRoute, useNavigation, RouteProp } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { Avatar } from '../components/ui/Avatar';
 import { useAuth } from '../contexts/AuthContext';
 import { useComments } from '../hooks/usePost';
+import { doc as firestoreDoc, getDoc, addDoc, collection as firestoreCollection, serverTimestamp } from 'firebase/firestore';
+import { db } from '../config/firebase';
+import { ScreenSkeleton, InlineLoadingSkeleton, ButtonLoadingSkeleton } from '../components/ui/LoadingSkeleton';
+import { FlashList } from '@shopify/flash-list';
 
-type CommentsScreenRouteProp = RouteProp<{ Comments: { postId: string; fromGlimpses?: boolean } }, 'Comments'>;
+type CommentsScreenRouteProp = RouteProp<{ Comments: { postId: string; fromGlimpses?: boolean; postType?: 'glimpse' | 'post'; targetCommentId?: string; highlightCommentId?: string; parentCommentId?: string } }, 'Comments'>;
 
 export default function CommentsScreen() {
   const route = useRoute<CommentsScreenRouteProp>();
@@ -25,7 +18,9 @@ export default function CommentsScreen() {
   const { user } = useAuth();
   
   const postId = route.params?.postId;
-  const isFromGlimpses = route.params?.fromGlimpses || false;
+  const isFromGlimpses = (route.params?.fromGlimpses ?? (route.params?.postType === 'glimpse')) || false;
+  const targetCommentId = route.params?.targetCommentId || route.params?.highlightCommentId || null;
+  const targetParentCommentId = route.params?.parentCommentId || null;
   
   const { comments, loading, addComment, likeComment, unlikeComment, deleteComment } = useComments(
     postId,
@@ -37,7 +32,31 @@ export default function CommentsScreen() {
   const [likedComments, setLikedComments] = useState<Set<string>>(new Set());
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const flatListRef = useRef<FlatList>(null);
+  const flatListRef = useRef<FlashList<any>>(null);
+  const [parentAuthorId, setParentAuthorId] = useState<string | null>(null);
+  const [highlightedCommentId, setHighlightedCommentId] = useState<string | null>(null);
+
+  // Load parent content to allow owner to moderate (delete) comments
+  useEffect(() => {
+    const loadParent = async () => {
+      try {
+        if (!postId) return;
+        const parentRef = firestoreDoc(db, isFromGlimpses ? 'glimpses' : 'posts', postId);
+        const snap = await getDoc(parentRef);
+        if (snap.exists()) {
+          const data: any = snap.data();
+          setParentAuthorId(data?.authorId || data?.userId || null);
+        }
+      } catch {}
+    };
+    loadParent();
+  }, [postId, isFromGlimpses]);
+
+  // Sync initially liked comments to render red heart immediately
+  useEffect(() => {
+    const preliked = comments.filter((c: any) => c.isLiked).map((c: any) => c.commentId);
+    setLikedComments(new Set(preliked));
+  }, [comments]);
 
   // Sort comments
   const topLevelComments = comments
@@ -51,6 +70,46 @@ export default function CommentsScreen() {
   const getRepliesForComment = (commentId: string) => {
     return comments.filter(c => c.parentCommentId === commentId);
   };
+
+  const handleScrollToIndexFailed = useCallback(({ index, averageItemLength }: any) => {
+    flatListRef.current?.scrollToOffset({
+      offset: Math.max(0, index * (averageItemLength || 104)),
+      animated: true,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!targetCommentId || comments.length === 0) return;
+
+    const targetComment = comments.find((comment: any) => comment.commentId === targetCommentId);
+    if (!targetComment) return;
+
+    const parentId = targetComment.parentCommentId || targetParentCommentId || null;
+    if (parentId) {
+      setExpandedComments(prev => {
+        if (prev.has(parentId)) return prev;
+        const next = new Set(prev);
+        next.add(parentId);
+        return next;
+      });
+    }
+
+    const topLevelId = parentId || targetComment.commentId;
+    const targetIndex = topLevelComments.findIndex((comment: any) => comment.commentId === topLevelId);
+    if (targetIndex >= 0) {
+      requestAnimationFrame(() => {
+        flatListRef.current?.scrollToIndex({ index: targetIndex, animated: true, viewPosition: 0.22 });
+      });
+    }
+
+    setHighlightedCommentId(targetComment.commentId);
+    const timer = setTimeout(() => {
+      setHighlightedCommentId((current) => current === targetComment.commentId ? null : current);
+    }, 2600);
+
+    return () => clearTimeout(timer);
+  }, [comments, targetCommentId, targetParentCommentId, topLevelComments]);
+
 
   const toggleReplies = (commentId: string) => {
     setExpandedComments(prev => {
@@ -77,6 +136,15 @@ export default function CommentsScreen() {
       await addComment(text.trim(), replyingTo?.commentId);
       setText('');
       setReplyingTo(null);
+
+      // Notify parent screen (e.g., viewer) of updated count
+      try {
+        const parentRef = firestoreDoc(db, isFromGlimpses ? 'glimpses' : 'posts', postId);
+        const snap = await getDoc(parentRef);
+        const newCount = snap.data()?.stats?.commentsCount ?? 0;
+        const onCommentAdded = (route.params as any)?.onCommentAdded as ((n: number) => void) | undefined;
+        onCommentAdded?.(newCount);
+      } catch {}
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to post comment');
     } finally {
@@ -87,7 +155,8 @@ export default function CommentsScreen() {
   const handleLike = async (commentId: string) => {
     if (!user) return;
 
-    const isLiked = likedComments.has(commentId);
+    const current = comments.find((c: any) => c.commentId === commentId);
+    const isLiked = likedComments.has(commentId) || !!current?.isLiked;
 
     // Optimistic update
     if (isLiked) {
@@ -115,6 +184,16 @@ export default function CommentsScreen() {
           onPress: async () => {
             try {
               await deleteComment(commentId);
+
+              // Notify parent screen (e.g., viewer) of updated count
+              try {
+                if (!postId) return;
+                const parentRef = firestoreDoc(db, isFromGlimpses ? 'glimpses' : 'posts', postId);
+                const snap = await getDoc(parentRef);
+                const newCount = snap.data()?.stats?.commentsCount ?? 0;
+                const onCommentAdded = (route.params as any)?.onCommentAdded as ((n: number) => void) | undefined;
+                onCommentAdded?.(newCount);
+              } catch {}
             } catch (error) {
               Alert.alert('Error', 'Failed to delete comment');
             }
@@ -122,6 +201,40 @@ export default function CommentsScreen() {
         },
       ]
     );
+  };
+
+  const handleReportComment = async (comment: any) => {
+    if (!user || !postId) return;
+    try {
+      await addDoc(firestoreCollection(db, 'commentReports'), {
+        postId,
+        commentId: comment.commentId,
+        commentAuthorId: comment.authorId,
+        reporterId: user.userId,
+        parentCommentId: comment.parentCommentId || null,
+        text: comment.text || '',
+        source: isFromGlimpses ? 'glimpse' : 'post',
+        createdAt: serverTimestamp(),
+        status: 'pending',
+      });
+      Alert.alert('Reported', 'Thanks. We will review this comment.');
+    } catch (error) {
+      Alert.alert('Error', 'Failed to report comment');
+    }
+  };
+
+  const handleCommentOptions = (comment: any) => {
+    const canDelete = comment.authorId === user?.userId || (parentAuthorId != null && parentAuthorId === user?.userId);
+    const buttons: Array<{ text: string; style?: 'default' | 'cancel' | 'destructive'; onPress?: () => void }> = [
+      { text: 'Report', style: 'destructive', onPress: () => handleReportComment(comment) },
+      { text: 'Cancel', style: 'cancel' },
+    ];
+
+    if (canDelete) {
+      buttons.unshift({ text: 'Delete', style: 'destructive', onPress: () => handleDelete(comment.commentId) });
+    }
+
+    Alert.alert('Comment options', 'Choose an action', buttons);
   };
 
   const formatTimeAgo = (timestamp: any) => {
@@ -137,30 +250,32 @@ export default function CommentsScreen() {
   };
 
   const renderComment = (comment: any, isReply: boolean = false) => {
-    const isLiked = likedComments.has(comment.commentId) || comment.likedBy?.includes(user?.userId || '');
+    const isLiked = !!comment.isLiked || likedComments.has(comment.commentId) || (comment.likedBy?.includes(user?.userId || '') ?? false);
     const replies = getRepliesForComment(comment.commentId);
     const isExpanded = expandedComments.has(comment.commentId);
-    const isMyComment = comment.authorId === user?.userId;
+    const canDelete = comment.authorId === user?.userId || (parentAuthorId != null && parentAuthorId === user?.userId);
 
     return (
       <View key={comment.commentId} style={[styles.commentContainer, isReply && styles.replyContainer]}>
         <TouchableOpacity
-          onPress={() => navigation.navigate('Profile' as never, { userId: comment.authorId } as never)}
+          onPress={() => (navigation as any).navigate('UserProfile', { userId: comment.authorId })}
         >
-          <Image
-            source={{ uri: comment.authorAvatarURL || 'https://via.placeholder.com/40' }}
-            style={styles.avatar}
-          />
+          <Avatar source={comment.authorAvatarURL} size={40} />
         </TouchableOpacity>
 
-        <View style={styles.commentContent}>
+        <View style={[styles.commentContent, highlightedCommentId === comment.commentId && styles.commentContentHighlighted]}>
           <View style={styles.commentHeader}>
-            <TouchableOpacity
-              onPress={() => navigation.navigate('Profile' as never, { userId: comment.authorId } as never)}
-            >
-              <Text style={styles.username}>{comment.authorUsername}</Text>
+            <View style={styles.commentHeaderLeft}>
+              <TouchableOpacity
+                onPress={() => (navigation as any).navigate('UserProfile', { userId: comment.authorId })}
+              >
+                <Text style={styles.username}>{comment.authorUsername}</Text>
+              </TouchableOpacity>
+              <Text style={styles.timeText}>{formatTimeAgo(comment.createdAt)}</Text>
+            </View>
+            <TouchableOpacity onPress={() => handleCommentOptions(comment)} style={styles.commentMoreButton}>
+              <Ionicons name="ellipsis-horizontal" size={16} color="#a1a1aa" />
             </TouchableOpacity>
-            <Text style={styles.timeText}>{formatTimeAgo(comment.createdAt)}</Text>
           </View>
 
           <Text style={styles.commentText}>{comment.text}</Text>
@@ -184,7 +299,7 @@ export default function CommentsScreen() {
               <Text style={styles.replyText}>Reply</Text>
             </TouchableOpacity>
 
-            {isMyComment && (
+            {canDelete && (
               <TouchableOpacity
                 onPress={() => handleDelete(comment.commentId)}
                 style={styles.actionButton}
@@ -202,7 +317,7 @@ export default function CommentsScreen() {
               >
                 <View style={styles.replyLine} />
                 <Text style={styles.viewRepliesText}>
-                  {isExpanded ? 'Hide' : 'View'} {replies.length} {replies.length === 1 ? 'reply' : 'replies'}
+                  {isExpanded ? 'Hide replies' : `(${replies.length}) View replies`}
                 </Text>
               </TouchableOpacity>
 
@@ -220,9 +335,7 @@ export default function CommentsScreen() {
 
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#3b82f6" />
-      </View>
+      <ScreenSkeleton variant="comments" rows={6} />
     );
   }
 
@@ -235,7 +348,7 @@ export default function CommentsScreen() {
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-          <Ionicons name="close" size={28} color="#000" />
+          <Ionicons name="close" size={28} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Comments</Text>
         <View style={styles.placeholder} />
@@ -249,12 +362,12 @@ export default function CommentsScreen() {
           <Text style={styles.emptyDescription}>Be the first to comment</Text>
         </View>
       ) : (
-        <FlatList
+        <FlashList estimatedItemSize={100}
           ref={flatListRef}
           data={topLevelComments}
           renderItem={({ item }) => renderComment(item)}
           keyExtractor={(item) => item.commentId}
-          contentContainerStyle={styles.listContainer}
+          contentContainerStyle={styles.listContainer as any}
         />
       )}
 
@@ -272,10 +385,7 @@ export default function CommentsScreen() {
 
       {/* Input Area */}
       <View style={styles.inputContainer}>
-        <Image
-          source={{ uri: user?.avatarURL || 'https://via.placeholder.com/40' }}
-          style={styles.inputAvatar}
-        />
+        <Avatar source={user?.avatarURL} size={32} />
         <TextInput
           style={styles.textInput}
           placeholder="Add a comment..."
@@ -291,7 +401,7 @@ export default function CommentsScreen() {
           disabled={!text.trim() || isSubmitting}
         >
           {isSubmitting ? (
-            <ActivityIndicator size="small" color="#3b82f6" />
+            <InlineLoadingSkeleton />
           ) : (
             <Ionicons name="send" size={20} color={text.trim() ? '#3b82f6' : '#9ca3af'} />
           )}
@@ -304,44 +414,47 @@ export default function CommentsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: '#09090b',
   },
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: '#09090b',
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderBottomWidth: 1,
-    borderBottomColor: '#e5e7eb',
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: '#111114',
   },
   backButton: {
     padding: 4,
   },
   headerTitle: {
     fontSize: 18,
-    fontWeight: '600',
-    color: '#000',
+    fontWeight: '700',
+    color: '#fff',
   },
   placeholder: {
     width: 36,
   },
   listContainer: {
-    paddingVertical: 12,
+    paddingVertical: 8,
+    paddingBottom: 22,
   },
   commentContainer: {
     flexDirection: 'row',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
   },
   replyContainer: {
-    marginLeft: 40,
-    paddingTop: 8,
+    marginLeft: 22,
+    paddingTop: 6,
   },
   avatar: {
     width: 40,
@@ -351,46 +464,67 @@ const styles = StyleSheet.create({
   },
   commentContent: {
     flex: 1,
+    backgroundColor: '#121216',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
   commentHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 4,
+  },
+  commentHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 1,
+  },
+  commentMoreButton: {
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    marginLeft: 8,
   },
   username: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#000',
+    color: '#f4f4f5',
     marginRight: 8,
   },
   timeText: {
     fontSize: 12,
-    color: '#9ca3af',
+    color: '#a1a1aa',
   },
   commentText: {
     fontSize: 14,
-    color: '#1f2937',
+    color: '#e4e4e7',
     lineHeight: 20,
     marginBottom: 8,
   },
   commentActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 16,
+    gap: 14,
   },
   actionButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 5,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
   },
   actionText: {
     fontSize: 13,
-    color: '#6b7280',
+    color: '#a1a1aa',
   },
   replyText: {
     fontSize: 13,
-    fontWeight: '500',
-    color: '#6b7280',
+    fontWeight: '600',
+    color: '#d4d4d8',
   },
   viewRepliesButton: {
     flexDirection: 'row',
@@ -401,12 +535,12 @@ const styles = StyleSheet.create({
   replyLine: {
     width: 24,
     height: 1,
-    backgroundColor: '#d1d5db',
+    backgroundColor: 'rgba(255,255,255,0.25)',
   },
   viewRepliesText: {
     fontSize: 13,
     fontWeight: '500',
-    color: '#3b82f6',
+    color: '#7dd3fc',
   },
   repliesContainer: {
     marginTop: 8,
@@ -420,12 +554,12 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#374151',
+    color: '#e4e4e7',
     marginTop: 16,
   },
   emptyDescription: {
     fontSize: 14,
-    color: '#6b7280',
+    color: '#a1a1aa',
     marginTop: 8,
   },
   replyPreview: {
@@ -434,17 +568,17 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 16,
     paddingVertical: 10,
-    backgroundColor: '#f9fafb',
+    backgroundColor: '#121216',
     borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
+    borderTopColor: 'rgba(255,255,255,0.08)',
   },
   replyPreviewText: {
     fontSize: 13,
-    color: '#6b7280',
+    color: '#d4d4d8',
   },
   replyUsername: {
-    fontWeight: '600',
-    color: '#3b82f6',
+    fontWeight: '700',
+    color: '#67e8f9',
   },
   inputContainer: {
     flexDirection: 'row',
@@ -452,7 +586,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderTopWidth: 1,
-    borderTopColor: '#e5e7eb',
+    borderTopColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: '#0f0f12',
     gap: 12,
   },
   inputAvatar: {
@@ -463,7 +598,12 @@ const styles = StyleSheet.create({
   textInput: {
     flex: 1,
     fontSize: 15,
-    color: '#000',
+    color: '#fff',
+    backgroundColor: '#1a1a1f',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 16,
+    paddingHorizontal: 12,
     maxHeight: 100,
     paddingVertical: 8,
   },
@@ -473,4 +613,19 @@ const styles = StyleSheet.create({
   sendButtonDisabled: {
     opacity: 0.5,
   },
+  commentContentHighlighted: {
+    backgroundColor: '#1A2233',
+    borderColor: '#4DA3FF',
+    shadowColor: '#4DA3FF',
+    shadowOpacity: 0.16,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+  },
 });
+
+
+
+
+
+

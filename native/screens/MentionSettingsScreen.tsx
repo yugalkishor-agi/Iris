@@ -7,15 +7,22 @@ export default createSettingsScreen({
     {
       title: 'Allow Mentions From',
       items: [
-        { label: 'Everyone', type: 'action', icon: 'globe', onPress: () => console.log('Everyone') },
-        { label: 'People You Follow', type: 'action', icon: 'people', onPress: () => console.log('Following') },
-        { label: 'No One', type: 'action', icon: 'close-circle', onPress: () => console.log('None') },
+        { label: 'Everyone', type: 'action', icon: 'globe', settingKey: 'mentionPermission', settingScope: 'privacy', settingValue: 'everyone' },
+        { label: 'People You Follow', type: 'action', icon: 'people', settingKey: 'mentionPermission', settingScope: 'privacy', settingValue: 'following' },
+        { label: 'No One', type: 'action', icon: 'close-circle', settingKey: 'mentionPermission', settingScope: 'privacy', settingValue: 'none' },
       ],
     },
     {
       title: 'Settings',
       items: [
-        { label: 'Manual Mention Approval', type: 'toggle', icon: 'checkmark-done', value: false, onToggle: (v) => console.log('Manual:', v) },
+        {
+          label: 'Manual Mention Approval',
+          type: 'toggle',
+          icon: 'checkmark-done',
+          value: false,
+          settingKey: 'manualMentionApproval',
+          settingScope: 'privacy',
+        },
       ],
     },
   ],

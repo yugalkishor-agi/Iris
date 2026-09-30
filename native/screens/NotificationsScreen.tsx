@@ -1,20 +1,15 @@
-import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TouchableOpacity,
-  Image,
-  ActivityIndicator,
-  RefreshControl,
-} from 'react-native';
+import React, { useState, useEffect, memo, useCallback } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, RefreshControl, SafeAreaView, ScrollView } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../hooks/useNotifications';
 import { userService } from '../services/user.service';
+import { colors, spacing, typography } from '../styles/theme';
+import { Avatar } from '../components/ui/Avatar';
 import type { NotificationType } from '../types/database';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 function getNotificationIcon(type: NotificationType) {
   switch (type) {
@@ -43,14 +38,13 @@ function getNotificationIcon(type: NotificationType) {
   }
 }
 
-export default function NotificationsScreen() {
+const NotificationsScreen = memo(function NotificationsScreen() {
   const navigation = useNavigation();
   const { user } = useAuth();
-  const { notifications, loading, markAsRead, markAllAsRead, refresh } = useNotifications();
-  
-  const [refreshing, setRefreshing] = useState(false);
-  const [followingStatus, setFollowingStatus] = useState<{ [key: string]: boolean }>({});
+  const { notifications, loading, refreshing, markAsRead, markAllAsRead, refresh } = useNotifications();
   const [activeTab, setActiveTab] = useState<'all' | 'unread'>('all');
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [followingStatus, setFollowingStatus] = useState<{ [key: string]: boolean }>({});
 
   // Load following status for all actors
   useEffect(() => {
@@ -72,9 +66,9 @@ export default function NotificationsScreen() {
   }, [user, notifications]);
 
   const handleRefresh = async () => {
-    setRefreshing(true);
+    setIsRefreshing(true);
     await refresh();
-    setRefreshing(false);
+    setIsRefreshing(false);
   };
 
   const handleFollowUser = async (userId: string) => {
@@ -92,14 +86,14 @@ export default function NotificationsScreen() {
     }
 
     // Navigate based on notification type
-    if (notification.postId) {
-      navigation.navigate('PostView' as never, { postId: notification.postId } as never);
-    } else if (notification.glimpseId) {
-      navigation.navigate('GlimpseView' as never, { glimpseId: notification.glimpseId } as never);
+    if (notification.glimpseId) {
+      (navigation as any).navigate('GlimpseViewer', { glimpseId: notification.glimpseId });
+    } else if (notification.postId) {
+      (navigation as any).navigate('PostView', { postId: notification.postId });
     } else if (notification.actorId && ['follow', 'follow_request'].includes(notification.type)) {
-      navigation.navigate('Profile' as never, { userId: notification.actorId } as never);
+      (navigation as any).navigate('UserProfile', { userId: notification.actorId });
     } else if (notification.type === 'dm') {
-      navigation.navigate('Chat' as never, { userId: notification.actorId } as never);
+      (navigation as any).navigate('Chat', { userId: notification.actorId });
     }
   };
 
@@ -119,10 +113,7 @@ export default function NotificationsScreen() {
         activeOpacity={0.7}
       >
         <View style={styles.avatarContainer}>
-          <Image
-            source={{ uri: item.actorAvatarURL || 'https://via.placeholder.com/50' }}
-            style={styles.avatar}
-          />
+          <Avatar source={item.actorAvatarURL} size={50} />
           <View style={[styles.iconBadge, { backgroundColor: iconConfig.color }]}>
             <Ionicons name={iconConfig.name} size={12} color="#fff" />
           </View>
@@ -182,8 +173,11 @@ export default function NotificationsScreen() {
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
+        <TouchableOpacity onPress={() => (navigation as any).goBack()} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={22} color="#111827" />
+        </TouchableOpacity>
         <Text style={styles.headerTitle}>Notifications</Text>
-        <TouchableOpacity onPress={() => markAllAsRead()}>
+        <TouchableOpacity onPress={() => markAllAsRead()} style={styles.headerAction}>
           <Ionicons name="checkmark-done" size={24} color="#3b82f6" />
         </TouchableOpacity>
       </View>
@@ -225,19 +219,21 @@ export default function NotificationsScreen() {
           </Text>
         </View>
       ) : (
-        <FlatList
+        <FlashList estimatedItemSize={100}
           data={filteredNotifications}
           renderItem={renderNotificationItem}
           keyExtractor={(item) => item.notificationId}
-          contentContainerStyle={styles.listContainer}
+          contentContainerStyle={styles.listContainer as any}
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
+            <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} />
           }
         />
       )}
     </View>
   );
-}
+});
+
+export default NotificationsScreen;
 
 const styles = StyleSheet.create({
   container: {
@@ -258,6 +254,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e5e7eb',
   },
+  backButton: { paddingRight: 8, paddingVertical: 4 },
+  headerAction: { paddingLeft: 8, paddingVertical: 4 },
   headerTitle: {
     fontSize: 24,
     fontWeight: '700',
@@ -389,3 +387,6 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
 });
+
+
+

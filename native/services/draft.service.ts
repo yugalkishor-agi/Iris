@@ -10,6 +10,26 @@ export interface PostDraft {
   caption?: string;
   mediaURL?: string;
   mediaType?: 'image' | 'video';
+  mediaItems?: Array<{
+    uri: string;
+    thumbnail?: string;
+    type?: 'image' | 'video' | string;
+    width?: number;
+    height?: number;
+    duration?: number;
+    editedAt?: number;
+  }>;
+  allowSharing?: boolean;
+  audience?: 'public' | 'followers' | 'close_friends' | 'closeFriends';
+  backgroundMusic?: {
+    trackId?: string;
+    trackTitle?: string;
+    artistName?: string;
+    coverArtURL?: string;
+    streamURL?: string;
+    clipStart?: number;
+    clipEnd?: number;
+  };
   tags?: string[];
   mentions?: string[];
   taggedUsers?: string[];
@@ -338,3 +358,5 @@ export class DraftService {
 
 // Export singleton instance
 export const draftService = new DraftService();
+
+

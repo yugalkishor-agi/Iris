@@ -287,6 +287,52 @@ export class CollectionService {
   }
 
   /**
+   * Unsave a post from all of the user's collections where it exists.
+   * Returns the number of collections the post was removed from.
+   */
+  async unsavePostFromAllCollections(userId: string, postId: string): Promise<number> {
+    const collections = await this.getUserCollections(userId);
+    if (collections.length === 0) return 0;
+
+    let removedCount = 0;
+
+    // Build a batch of deletes and collection count decrements
+    const batch = writeBatch(db);
+
+    for (const c of collections) {
+      const postRefInCollection = doc(
+        db,
+        `users/${userId}/savedCollections/${c.collectionId}/posts/${postId}`
+      );
+      const snap = await getDoc(postRefInCollection);
+      if (snap.exists()) {
+        batch.delete(postRefInCollection);
+        const collectionRef = doc(
+          db,
+          `users/${userId}/savedCollections/${c.collectionId}`
+        );
+        batch.update(collectionRef, {
+          postsCount: increment(-1),
+          updatedAt: serverTimestamp(),
+        });
+        removedCount += 1;
+      }
+    }
+
+    if (removedCount > 0) {
+      await batch.commit();
+
+      // Decrement savesCount on the post by the number of removed entries
+      const postRef = doc(db, 'posts', postId);
+      await updateDoc(postRef, {
+        'stats.savesCount': increment(-removedCount),
+      });
+    }
+
+    return removedCount;
+  }
+
+  /**
    * Get posts in collection
    */
   async getCollectionPosts(
@@ -301,16 +347,86 @@ export class CollectionService {
     const q = query(postsRef, orderBy('savedAt', 'desc'), limit(limitCount));
 
     const snapshot = await getDocs(q);
-    const postIds = snapshot.docs.map((doc) => doc.data().postId);
-
-    // Fetch actual post documents
+    // Fetch actual post documents and enrich with author + savedAt
     const posts: Post[] = [];
-    for (const postId of postIds) {
+    for (const savedDoc of snapshot.docs) {
+      const data = savedDoc.data() as any;
+      const postId = data.postId;
+      const savedAt = data.savedAt;
+      const contentType = data.contentType || 'post';
+      if (!postId) continue;
+
+      // Glimpse saved in playlist
+      if (contentType === 'glimpse') {
+        const glimpseRef = doc(db, 'glimpses', postId);
+        const glimpseSnap = await getDoc(glimpseRef);
+        if (!glimpseSnap.exists()) continue;
+
+        const glimpseData: any = glimpseSnap.data();
+        const mapped: any = {
+          ...glimpseData,
+          postId,
+          glimpseId: postId,
+          storyId: postId,
+          isGlimpse: true,
+          mediaURL: glimpseData.mediaURL || glimpseData.mediaURLs?.[0] || '',
+          mediaURLs: glimpseData.mediaURLs?.length ? glimpseData.mediaURLs : (glimpseData.mediaURL ? [glimpseData.mediaURL] : []),
+          savedAt,
+        };
+
+        // Ensure author fields are present
+        try {
+          if (
+            mapped.authorVerified === undefined ||
+            !mapped.authorUsername ||
+            !mapped.authorAvatarURL
+          ) {
+            const authorRef = doc(db, 'users', mapped.authorId);
+            const authorSnap = await getDoc(authorRef);
+            if (authorSnap.exists()) {
+              const userData: any = authorSnap.data();
+              if (mapped.authorVerified === undefined) mapped.authorVerified = !!userData.verified;
+              if (!mapped.authorUsername) mapped.authorUsername = userData.username;
+              if (!mapped.authorAvatarURL) mapped.authorAvatarURL = userData.avatarURL || '';
+            } else if (mapped.authorVerified === undefined) {
+              mapped.authorVerified = false;
+            }
+          }
+        } catch {}
+
+        posts.push(mapped as Post);
+        continue;
+      }
+
       const postRef = doc(db, 'posts', postId);
       const postSnap = await getDoc(postRef);
-      if (postSnap.exists()) {
-        posts.push(postSnap.data() as Post);
-      }
+      if (!postSnap.exists()) continue;
+
+      const postData = postSnap.data() as Post;
+      (postData as any).postId = postId;
+      (postData as any).savedAt = savedAt;
+
+      // Ensure author fields are present
+      try {
+        if (
+          postData.authorVerified === undefined ||
+          !postData.authorUsername ||
+          !postData.authorAvatarURL
+        ) {
+          const authorRef = doc(db, 'users', postData.authorId);
+          const authorSnap = await getDoc(authorRef);
+          if (authorSnap.exists()) {
+            const userData: any = authorSnap.data();
+            if (postData.authorVerified === undefined) postData.authorVerified = !!userData.verified;
+            if (!postData.authorUsername) postData.authorUsername = userData.username;
+            if (!postData.authorAvatarURL) postData.authorAvatarURL = userData.avatarURL || '';
+          } else if (postData.authorVerified === undefined) {
+            postData.authorVerified = false;
+          }
+        }
+      } catch {}
+
+      posts.push(postData);
     }
 
     return posts;
@@ -320,28 +436,45 @@ export class CollectionService {
    * Get all saved posts (across all collections)
    */
   async getAllSavedPosts(userId: string, limitCount = 50): Promise<Post[]> {
-    const collections = await this.getUserCollections(userId);
-
-    const allPosts: Post[] = [];
-    const seenPostIds = new Set<string>();
-
-    for (const collection of collections) {
-      const posts = await this.getCollectionPosts(
-        userId,
-        collection.collectionId,
-        limitCount
-      );
-
-      posts.forEach((post) => {
-        if (!seenPostIds.has(post.postId)) {
-          seenPostIds.add(post.postId);
-          allPosts.push(post);
+    try {
+      const collections = await this.getUserCollections(userId);
+      const allPosts: Post[] = [];
+      for (const collection of collections) {
+        try {
+          const posts = await this.getCollectionPosts(userId, collection.collectionId);
+          allPosts.push(...posts);
+        } catch (error) {
+          // continue
         }
-      });
-    }
+      }
 
-    // Sort by saved date (most recent first)
-    return allPosts;
+      // Deduplicate by postId (same post may exist in multiple collections)
+      const map = new Map<string, Post>();
+      for (const p of allPosts) {
+        const id = (p as any).postId || (p as any).id;
+        if (!id) continue;
+        const existing = map.get(id);
+        // Keep the most recent savedAt
+        if (!existing) map.set(id, p);
+        else {
+          const a = (existing as any).savedAt?.toDate?.() || new Date(0);
+          const b = (p as any).savedAt?.toDate?.() || new Date(0);
+          if (b > a) map.set(id, p);
+        }
+      }
+
+      const deduped = Array.from(map.values());
+      // Sort by savedAt desc
+      deduped.sort((a, b) => {
+        const aTime = (a as any).savedAt?.toDate?.() || new Date(0);
+        const bTime = (b as any).savedAt?.toDate?.() || new Date(0);
+        return bTime.getTime() - aTime.getTime();
+      });
+
+      return deduped.slice(0, limitCount);
+    } catch (error) {
+      return [];
+    }
   }
 
   /**

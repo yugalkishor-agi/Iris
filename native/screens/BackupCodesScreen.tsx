@@ -1,7 +1,8 @@
 import React from 'react';
-import { View, Text, FlatList, TouchableOpacity, Share, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, Share, StyleSheet } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { FlashList } from '@shopify/flash-list';
 
 export default function BackupCodesScreen() {
   const navigation = useNavigation();
@@ -34,7 +35,7 @@ export default function BackupCodesScreen() {
           Save these codes in a secure place. Each can only be used once.
         </Text>
       </View>
-      <FlatList
+      <FlashList estimatedItemSize={100}
         data={codes}
         renderItem={({ item }) => (
           <View style={styles.code}>
@@ -42,7 +43,7 @@ export default function BackupCodesScreen() {
           </View>
         )}
         keyExtractor={(item) => item}
-        contentContainerStyle={styles.list}
+        contentContainerStyle={styles.list as any}
       />
     </View>
   );

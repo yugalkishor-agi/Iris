@@ -1,7 +1,9 @@
 import React from 'react';
-import { View, Text, FlatList, TouchableOpacity, Image, StyleSheet, Dimensions } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Dimensions } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 const { width } = Dimensions.get('window');
 const ITEM_SIZE = width / 3;
@@ -17,7 +19,7 @@ export default function MentionsScreen() {
         <Text style={styles.title}>Mentions</Text>
         <View style={{ width: 28 }} />
       </View>
-      <FlatList
+      <FlashList estimatedItemSize={100}
         data={mentions}
         numColumns={3}
         renderItem={({ item }) => <Image source={{ uri: item.image }} style={styles.post} />}

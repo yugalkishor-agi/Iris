@@ -1,31 +1,49 @@
 import { initializeApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
-import { getAuth } from 'firebase/auth';
+// @ts-ignore - getReactNativePersistence is exported from firebase/auth but types may not be available
+import { initializeAuth, getReactNativePersistence, getAuth, type Auth } from 'firebase/auth';
 import { getStorage } from 'firebase/storage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { backendConfigSummary, runtimeConfig, runtimeConfigSource } from './runtimeConfig';
+
+if (__DEV__ && runtimeConfigSource.firebaseFromFallback) {
+  console.warn(
+    '[Config] Firebase env vars not injected. Using temporary fallback values from config/runtimeConfig.ts.'
+  );
+}
+
+if (__DEV__) {
+  console.log(
+    `[Config] Firebase target project=${backendConfigSummary.firebase.projectId} authDomain=${backendConfigSummary.firebase.authDomain} tempOverride=${backendConfigSummary.firebase.tempOverrideEnabled}`
+  );
+}
 
 const firebaseConfig = {
-  apiKey: "AIzaSyD9PHBh208uc4lDO9F3lvBUFUotnzGd56k",
-  authDomain: "appmode-a6696.firebaseapp.com",
-  databaseURL: "https://appmode-a6696-default-rtdb.firebaseio.com",
-  projectId: "appmode-a6696",
-  storageBucket: "appmode-a6696.firebasestorage.app",
-  messagingSenderId: "350506689842",
-  appId: "1:350506689842:web:28faec26001e4f1331632b",
-  measurementId: "G-SL94R1QEMC"
+  apiKey: runtimeConfig.firebase.apiKey,
+  authDomain: runtimeConfig.firebase.authDomain,
+  databaseURL: runtimeConfig.firebase.databaseURL,
+  projectId: runtimeConfig.firebase.projectId,
+  storageBucket: runtimeConfig.firebase.storageBucket,
+  messagingSenderId: runtimeConfig.firebase.messagingSenderId,
+  appId: runtimeConfig.firebase.appId,
+  measurementId: runtimeConfig.firebase.measurementId,
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Firestore
 export const db = getFirestore(app);
 
-// Initialize Auth
-export const auth = getAuth(app);
+let authInstance: Auth;
+try {
+  authInstance = initializeAuth(app, {
+    persistence: getReactNativePersistence(AsyncStorage),
+  });
+} catch {
+  // Hot reload / duplicate init path
+  authInstance = getAuth(app);
+}
 
-// Initialize Storage
+export const auth = authInstance;
 export const storage = getStorage(app);
-
-console.log('🔥 Firebase initialized for React Native');
 
 export default app;

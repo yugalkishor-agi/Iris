@@ -6,11 +6,12 @@
 import { auth, db } from '../config/firebase';
 import { 
   signInWithEmailAndPassword, 
-  signOut,
   User as FirebaseUser 
 } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { storageService } from './storage.service';
+import { authService } from './auth.service';
 
 // Storage keys
 const STORAGE_KEYS = {
@@ -54,7 +55,7 @@ class MultiAccountService {
 
     try {
       // Try to load existing key
-      const storedKey = localStorage.getItem(STORAGE_KEYS.ENCRYPTION_KEY);
+      const storedKey = await AsyncStorage.getItem(STORAGE_KEYS.ENCRYPTION_KEY);
       
       if (storedKey) {
         // Import existing key
@@ -76,7 +77,7 @@ class MultiAccountService {
 
         // Export and store key
         const exportedKey = await crypto.subtle.exportKey('jwk', this.encryptionKey);
-        localStorage.setItem(STORAGE_KEYS.ENCRYPTION_KEY, JSON.stringify(exportedKey));
+        await AsyncStorage.setItem(STORAGE_KEYS.ENCRYPTION_KEY, JSON.stringify(exportedKey));
       }
     } catch (error) {
       console.error('Failed to initialize encryption:', error);
@@ -152,11 +153,11 @@ class MultiAccountService {
   /**
    * Get all stored accounts
    */
-  getAccounts(): StoredAccount[] {
+  async getAccounts(): Promise<StoredAccount[]> {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.ACCOUNTS);
+      const data = await AsyncStorage.getItem(STORAGE_KEYS.ACCOUNTS);
       if (!data) return [];
-
+      
       const accountsData: AccountsData = JSON.parse(data);
       return accountsData.accounts || [];
     } catch (error) {
@@ -168,15 +169,15 @@ class MultiAccountService {
   /**
    * Get active account ID
    */
-  getActiveAccountId(): string | null {
+  async getActiveAccountId(): Promise<string | null> {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.ACCOUNTS);
+      const data = await AsyncStorage.getItem(STORAGE_KEYS.ACCOUNTS);
       if (!data) return null;
-
-      const accountsData: AccountsData = JSON.parse(data);
-      return accountsData.activeAccountId || null;
+      
+      const parsed: AccountsData = JSON.parse(data);
+      return parsed.activeAccountId || null;
     } catch (error) {
-      console.error('Failed to get active account:', error);
+      console.error('Failed to get active account ID:', error);
       return null;
     }
   }
@@ -184,28 +185,29 @@ class MultiAccountService {
   /**
    * Get active account details
    */
-  getActiveAccount(): StoredAccount | null {
-    const accounts = this.getAccounts();
-    const activeId = this.getActiveAccountId();
+  async getActiveAccount(): Promise<StoredAccount | null> {
+    const accounts = await this.getAccounts();
+    const activeId = await this.getActiveAccountId();
     
     if (!activeId) return null;
     
-    return accounts.find(acc => acc.userId === activeId) || null;
+    return accounts.find((acc: any) => acc.userId === activeId) || null;
   }
 
   /**
-   * Check if user can add more accounts
+   * Check if we can add more accounts
    */
-  canAddAccount(): boolean {
-    return this.getAccounts().length < MAX_ACCOUNTS;
+  async canAddAccount(): Promise<boolean> {
+    const accounts = await this.getAccounts();
+    return accounts.length < MAX_ACCOUNTS;
   }
 
   /**
    * Check rate limiting for account switching
    */
-  canSwitch(): boolean {
+  async canSwitch(): Promise<boolean> {
     try {
-      const lastSwitch = localStorage.getItem(STORAGE_KEYS.LAST_SWITCH);
+      const lastSwitch = await AsyncStorage.getItem(STORAGE_KEYS.LAST_SWITCH);
       if (!lastSwitch) return true;
 
       const timeSinceLastSwitch = Date.now() - parseInt(lastSwitch, 10);
@@ -219,12 +221,12 @@ class MultiAccountService {
    * Add a new account
    */
   async addAccount(
-    email: string, 
+    email: string,
     password: string
   ): Promise<{ success: boolean; account?: StoredAccount; error?: string }> {
     try {
       // Check account limit
-      if (!this.canAddAccount()) {
+      if (!(await this.canAddAccount())) {
         return { success: false, error: 'Maximum 3 accounts allowed' };
       }
 
@@ -242,8 +244,7 @@ class MultiAccountService {
       const userData = userDoc.data();
 
       // Check if account already exists
-      const existingAccounts = this.getAccounts();
-      if (existingAccounts.some(acc => acc.userId === firebaseUser.uid)) {
+      if (await this.hasAccount(firebaseUser.uid)) {
         return { success: false, error: 'Account already added' };
       }
 
@@ -268,15 +269,15 @@ class MultiAccountService {
       };
 
       // Add to storage
-      const accounts = this.getAccounts();
+      const accounts = await this.getAccounts();
       accounts.push(newAccount);
 
       const accountsData: AccountsData = {
         accounts,
-        activeAccountId: this.getActiveAccountId() || newAccount.userId
+        activeAccountId: (await this.getActiveAccountId()) || newAccount.userId
       };
 
-      localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accountsData));
+      await AsyncStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accountsData));
 
       console.log('✅ Account added successfully:', newAccount.username);
       return { success: true, account: newAccount };
@@ -291,37 +292,43 @@ class MultiAccountService {
   }
 
   /**
+   * Check if account exists
+   */
+  async hasAccount(userId: string): Promise<boolean> {
+    const accounts = await this.getAccounts();
+    return accounts.find((acc: any) => acc.userId === userId) !== undefined;
+  }
+
+  /**
    * Remove an account
    */
   async removeAccount(userId: string): Promise<boolean> {
     try {
-      const accounts = this.getAccounts();
-      const activeId = this.getActiveAccountId();
-
-      // Cannot remove active account if it's the only one
-      if (accounts.length === 1 && activeId === userId) {
-        throw new Error('Cannot remove the only account. Please add another account first.');
-      }
-
-      // Filter out the account
-      const updatedAccounts = accounts.filter(acc => acc.userId !== userId);
-
-      // Update active account if removed account was active
+      const accounts = await this.getAccounts();
+      const activeId = await this.getActiveAccountId();
+      
+      if (accounts.length === 0) return false;
+      
+      const updatedAccounts = accounts.filter((acc: any) => acc.userId !== userId);
+      
+      // If removing active account, switch to another or clear
       let newActiveId = activeId;
       if (activeId === userId) {
-        newActiveId = updatedAccounts[0]?.userId || '';
+        newActiveId = updatedAccounts.length > 0 ? updatedAccounts[0].userId : '';
+        
+        // Sign out current user if removing active account
+        await authService.signOut();
       }
-
+      
       const accountsData: AccountsData = {
         accounts: updatedAccounts,
-        activeAccountId: newActiveId
+        activeAccountId: newActiveId || ''
       };
-
-      localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accountsData));
-
-      console.log('✅ Account removed successfully');
+      
+      await AsyncStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accountsData));
+      console.log('✅ Account removed:', userId);
       return true;
-
+      
     } catch (error) {
       console.error('❌ Failed to remove account:', error);
       return false;
@@ -337,15 +344,15 @@ class MultiAccountService {
   ): Promise<{ success: boolean; error?: string }> {
     try {
       // Check rate limiting
-      if (!this.canSwitch()) {
+      if (!(await this.canSwitch())) {
         return { 
           success: false, 
           error: 'Please wait before switching accounts again' 
         };
       }
 
-      const accounts = this.getAccounts();
-      const targetAccount = accounts.find(acc => acc.userId === targetUserId);
+      const accounts = await this.getAccounts();
+      const targetAccount = accounts.find((acc: any) => acc.userId === targetUserId);
 
       if (!targetAccount) {
         return { success: false, error: 'Account not found' };
@@ -357,8 +364,10 @@ class MultiAccountService {
         return { success: false, error: 'biometric_required' };
       }
 
+      const previousActiveId = await this.getActiveAccountId();
+
       // Sign out current user first
-      await signOut(auth);
+      await authService.signOut();
 
       // Try to switch using encrypted password if available
       if (targetAccount.encryptedPassword) {
@@ -402,7 +411,7 @@ class MultiAccountService {
 
       // Update active account and lastActive time
       const accountsData: AccountsData = {
-        accounts: accounts.map(acc => 
+        accounts: accounts.map((acc: any) => 
           acc.userId === targetUserId 
             ? { ...acc, lastActive: Date.now() }
             : acc
@@ -410,13 +419,12 @@ class MultiAccountService {
         activeAccountId: targetUserId
       };
 
-      localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accountsData));
-      localStorage.setItem(STORAGE_KEYS.LAST_SWITCH, Date.now().toString());
+      await AsyncStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accountsData));
+      await AsyncStorage.setItem(STORAGE_KEYS.LAST_SWITCH, Date.now().toString());
 
       // Handle storage switch (clear old cache, load new cache)
-      const currentUserId = this.getActiveAccountId();
-      if (currentUserId && currentUserId !== targetUserId) {
-        await storageService.handleAccountSwitch(currentUserId, targetUserId);
+      if (previousActiveId && previousActiveId !== targetUserId) {
+        await storageService.handleAccountSwitch(previousActiveId, targetUserId);
       }
 
       console.log('✅ Switched to account:', targetAccount.username);
@@ -434,15 +442,15 @@ class MultiAccountService {
   /**
    * Get next account in rotation (for quick double-tap switch)
    */
-  getNextAccount(): StoredAccount | null {
-    const accounts = this.getAccounts();
-    const activeId = this.getActiveAccountId();
+  async getNextAccount(): Promise<StoredAccount | null> {
+    const accounts = await this.getAccounts();
+    const activeId = await this.getActiveAccountId();
 
     if (accounts.length <= 1) return null;
 
-    const currentIndex = accounts.findIndex(acc => acc.userId === activeId);
+    const currentIndex = accounts.findIndex((acc: any) => acc.userId === activeId);
     const nextIndex = (currentIndex + 1) % accounts.length;
-
+    
     return accounts[nextIndex];
   }
 
@@ -451,11 +459,11 @@ class MultiAccountService {
    */
   async clearAllAccounts(): Promise<void> {
     try {
-      await signOut(auth);
-      localStorage.removeItem(STORAGE_KEYS.ACCOUNTS);
-      localStorage.removeItem(STORAGE_KEYS.ACTIVE_ACCOUNT);
-      localStorage.removeItem(STORAGE_KEYS.LAST_SWITCH);
-      localStorage.removeItem(STORAGE_KEYS.ENCRYPTION_KEY);
+      await authService.signOut();
+      await AsyncStorage.removeItem(STORAGE_KEYS.ACCOUNTS);
+      await AsyncStorage.removeItem(STORAGE_KEYS.ACTIVE_ACCOUNT);
+      await AsyncStorage.removeItem(STORAGE_KEYS.LAST_SWITCH);
+      await AsyncStorage.removeItem(STORAGE_KEYS.ENCRYPTION_KEY);
       this.encryptionKey = null;
       console.log('✅ All accounts cleared');
     } catch (error) {
@@ -467,12 +475,12 @@ class MultiAccountService {
   /**
    * Update account info (avatar, username, etc.)
    */
-  updateAccountInfo(userId: string, updates: Partial<StoredAccount>): boolean {
+  async updateAccountInfo(userId: string, updates: Partial<StoredAccount>): Promise<boolean> {
     try {
-      const accounts = this.getAccounts();
-      const activeId = this.getActiveAccountId();
+      const accounts = await this.getAccounts();
+      const activeId = await this.getActiveAccountId();
 
-      const updatedAccounts = accounts.map(acc =>
+      const updatedAccounts = accounts.map((acc: any) =>
         acc.userId === userId ? { ...acc, ...updates } : acc
       );
 
@@ -481,7 +489,7 @@ class MultiAccountService {
         activeAccountId: activeId || ''
       };
 
-      localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accountsData));
+      await AsyncStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accountsData));
       return true;
     } catch (error) {
       console.error('Failed to update account info:', error);
@@ -492,3 +500,6 @@ class MultiAccountService {
 
 // Export singleton instance
 export const multiAccountService = new MultiAccountService();
+
+
+

@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import Konva from 'konva';
 
 export interface TextLayer {
   id: string;
@@ -133,8 +132,8 @@ interface StoryEditorState {
   canRedo: boolean;
   
   // Export
-  stageRef: React.RefObject<Konva.Stage> | null;
-  setStageRef: (ref: React.RefObject<Konva.Stage>) => void;
+  stageRef: React.RefObject<any> | null;
+  setStageRef: (ref: React.RefObject<any>) => void;
   exportAsImage: () => Promise<string | null>;
   
   // Reset

@@ -1,7 +1,11 @@
 /**
- * Biometric Authentication Service
- * Uses Web Authentication API (WebAuthn) for fingerprint/face authentication
+ * Enhanced Biometric Authentication Service for React Native
+ * Uses expo-local-authentication for fingerprint/face ID authentication
+ * Includes advanced security features and multi-factor authentication
  */
+
+import * as LocalAuthentication from 'expo-local-authentication';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const STORAGE_KEY = 'iris_biometric_credentials';
 

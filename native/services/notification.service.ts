@@ -16,6 +16,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import type { Notification, NotificationType } from '../types/database';
+import { pushService } from './push.service';
 
 export class NotificationService {
   // ==========================================
@@ -34,7 +35,8 @@ export class NotificationService {
     refType: string,
     refId: string,
     refPreview?: string,
-    refMediaURL?: string
+    refMediaURL?: string,
+    extraData?: Record<string, any>
   ): Promise<string> {
     const notificationRef = doc(collection(db, 'notifications'));
     const notificationId = notificationRef.id;
@@ -42,6 +44,7 @@ export class NotificationService {
     const notificationData: any = {
       notificationId,
       userId,
+      recipientId: userId,
       type,
       actorId,
       actorUsername,
@@ -49,6 +52,7 @@ export class NotificationService {
       refType,
       refId,
       isRead: false,
+      read: false,
       createdAt: serverTimestamp(),
     };
 
@@ -59,8 +63,19 @@ export class NotificationService {
     if (refMediaURL !== undefined && refMediaURL !== null) {
       notificationData.refMediaURL = refMediaURL;
     }
+    if (extraData && typeof extraData === 'object') {
+      Object.entries(extraData).forEach(([key, value]) => {
+        if (value !== undefined) {
+          notificationData[key] = value;
+        }
+      });
+    }
 
     await setDoc(notificationRef, notificationData);
+
+    try {
+      void pushService.sendForNotification(notificationData);
+    } catch {}
 
     return notificationId;
   }
@@ -77,30 +92,83 @@ export class NotificationService {
     const q = query(
       notifsRef,
       where('userId', '==', userId),
-      where('type', '!=', 'dm'),
-      orderBy('type'),
+      orderBy('createdAt', 'desc'),
+      limit(limitCount)
+    );
+
+    const legacyQ = query(
+      notifsRef,
+      where('recipientId', '==', userId),
+      orderBy('createdAt', 'desc'),
+      limit(limitCount)
+    );
+
+    const [snapshot, legacySnapshot] = await Promise.all([
+      getDocs(q),
+      getDocs(legacyQ).catch(() => ({ docs: [] as any[] })),
+    ]);
+
+    const merged = new Map<string, Notification>();
+    [...snapshot.docs, ...legacySnapshot.docs].forEach((docSnap) => {
+      const data = docSnap.data() as Notification;
+      const id = (data as any).notificationId || docSnap.id;
+      merged.set(id, {
+        ...data,
+        notificationId: id,
+        isRead: (data as any).isRead ?? (data as any).read ?? false,
+      } as Notification);
+    });
+
+    return Array.from(merged.values())
+      .filter((n: any) => n.type !== 'dm')
+      .sort((a: any, b: any) => {
+        const aTime = a.createdAt?.toMillis?.() || 0;
+        const bTime = b.createdAt?.toMillis?.() || 0;
+        return bTime - aTime;
+      })
+      .slice(0, limitCount);
+  }
+
+  /**
+   * Get user's mentions, newest first
+   */
+  async getMentions(userId: string, limitCount = 50): Promise<Array<{
+    mentionId: string;
+    postId: string;
+    type: 'post' | 'comment' | 'story';
+    authorId: string;
+    authorUsername: string;
+    authorAvatarURL?: string;
+    authorVerified?: boolean;
+    text: string;
+    thumbnailURL?: string;
+    createdAt: any;
+  }>> {
+    const notifsRef = collection(db, 'notifications');
+    const q = query(
+      notifsRef,
+      where('userId', '==', userId),
+      where('type', '==', 'mention'),
       orderBy('createdAt', 'desc'),
       limit(limitCount)
     );
 
     const snapshot = await getDocs(q);
-    return snapshot.docs.map((doc) => doc.data() as Notification);
-  }
-
-  /**
-   * Get unread notifications count (excludes messages)
-   */
-  async getUnreadCount(userId: string): Promise<number> {
-    const notifsRef = collection(db, 'notifications');
-    const q = query(
-      notifsRef,
-      where('userId', '==', userId),
-      where('isRead', '==', false),
-      where('type', '!=', 'dm')
-    );
-
-    const snapshot = await getDocs(q);
-    return snapshot.size;
+    return snapshot.docs.map((docSnap) => {
+      const n: any = docSnap.data();
+      return {
+        mentionId: n.notificationId || docSnap.id,
+        postId: n.refId,
+        type: (n.refType || 'post') as 'post' | 'comment' | 'story',
+        authorId: n.actorId,
+        authorUsername: n.actorUsername,
+        authorAvatarURL: n.actorAvatarURL,
+        authorVerified: n.actorVerified,
+        text: n.refPreview || n.message || '',
+        thumbnailURL: n.refMediaURL,
+        createdAt: n.createdAt,
+      };
+    });
   }
 
   /**
@@ -110,9 +178,85 @@ export class NotificationService {
     const notifRef = doc(db, 'notifications', notificationId);
     await updateDoc(notifRef, {
       isRead: true,
+      read: true,
       readAt: serverTimestamp(),
     });
   }
+
+  /**
+   * Mark notifications as delivered
+   */
+  async markNotificationsAsDelivered(userId: string): Promise<void> {
+    const notifsRef = collection(db, 'notifications');
+    const q = query(
+      notifsRef,
+      where('userId', '==', userId),
+      where('isRead', '==', false)
+    );
+
+    const legacyQ = query(
+      notifsRef,
+      where('recipientId', '==', userId),
+      where('read', '==', false)
+    );
+
+    const [snapshot, legacySnapshot] = await Promise.all([
+      getDocs(q),
+      getDocs(legacyQ).catch(() => ({ docs: [] as any[] })),
+    ]);
+    const batch = writeBatch(db);
+
+    const seen = new Set<string>();
+    [...snapshot.docs, ...legacySnapshot.docs].forEach((docSnap) => {
+      if (seen.has(docSnap.id)) return;
+      seen.add(docSnap.id);
+      batch.update(docSnap.ref, {
+        deliveredAt: serverTimestamp(),
+      });
+    });
+
+    if (seen.size > 0) {
+      await batch.commit();
+    }
+  }
+  async markNotificationsAsDeliveredByIds(notificationIds: string[]): Promise<void> {
+    const uniqueIds = Array.from(new Set(notificationIds.filter(Boolean)));
+    if (uniqueIds.length === 0) return;
+
+    const batch = writeBatch(db);
+    uniqueIds.forEach((notificationId) => {
+      batch.update(doc(db, 'notifications', notificationId), {
+        deliveredAt: serverTimestamp(),
+      });
+    });
+
+    await batch.commit();
+  }
+
+  async markManyAsRead(notificationIds: string[]): Promise<void> {
+    const uniqueIds = Array.from(new Set(notificationIds.filter(Boolean)));
+    if (uniqueIds.length === 0) return;
+
+    const batch = writeBatch(db);
+    uniqueIds.forEach((notificationId) => {
+      batch.update(doc(db, 'notifications', notificationId), {
+        isRead: true,
+        read: true,
+        readAt: serverTimestamp(),
+      });
+    });
+
+    await batch.commit();
+  }
+  /**
+   * Get unread notifications count (excludes messages)
+   */
+  async getUnreadCount(userId: string): Promise<number> {
+    const notifications = await this.getUserNotifications(userId, 200);
+    return notifications.filter((n: any) => !n.isRead && n.type !== 'dm').length;
+  }
+
+  
 
   /**
    * Mark all notifications as read
@@ -125,17 +269,32 @@ export class NotificationService {
       where('isRead', '==', false)
     );
 
-    const snapshot = await getDocs(q);
+    const legacyQ = query(
+      notifsRef,
+      where('recipientId', '==', userId),
+      where('read', '==', false)
+    );
+
+    const [snapshot, legacySnapshot] = await Promise.all([
+      getDocs(q),
+      getDocs(legacyQ).catch(() => ({ docs: [] as any[] })),
+    ]);
     const batch = writeBatch(db);
 
-    snapshot.docs.forEach((docSnap) => {
+    const seen = new Set<string>();
+    [...snapshot.docs, ...legacySnapshot.docs].forEach((docSnap) => {
+      if (seen.has(docSnap.id)) return;
+      seen.add(docSnap.id);
       batch.update(docSnap.ref, {
         isRead: true,
+        read: true,
         readAt: serverTimestamp(),
       });
     });
 
-    await batch.commit();
+    if (seen.size > 0) {
+      await batch.commit();
+    }
   }
 
   /**
@@ -176,7 +335,8 @@ export class NotificationService {
     likerUsername: string,
     likerAvatarURL: string,
     postId: string,
-    postMediaURL?: string
+    postMediaURL?: string,
+    extraData?: Record<string, any>
   ): Promise<void> {
     // Don't notify if user liked their own post
     if (postOwnerId === likerId) return;
@@ -190,7 +350,34 @@ export class NotificationService {
       'post',
       postId,
       undefined,
-      postMediaURL
+      postMediaURL,
+      extraData
+    );
+  }
+
+  /**
+   * Create glimpse like notification
+   */
+  async notifyGlimpseLike(
+    ownerId: string,
+    likerId: string,
+    likerUsername: string,
+    likerAvatarURL: string,
+    glimpseId: string,
+    coverImageURL?: string
+  ): Promise<void> {
+    if (ownerId === likerId) return;
+
+    await this.createNotification(
+      ownerId,
+      'like',
+      likerId,
+      likerUsername,
+      likerAvatarURL,
+      'glimpse',
+      glimpseId,
+      undefined,
+      coverImageURL
     );
   }
 
@@ -204,7 +391,8 @@ export class NotificationService {
     commenterAvatarURL: string,
     postId: string,
     commentText: string,
-    postMediaURL?: string
+    postMediaURL?: string,
+    extraData?: Record<string, any>
   ): Promise<void> {
     // Don't notify if user commented on their own post
     if (postOwnerId === commenterId) return;
@@ -218,7 +406,8 @@ export class NotificationService {
       'post',
       postId,
       commentText,
-      postMediaURL
+      postMediaURL,
+      extraData
     );
   }
 
@@ -252,7 +441,7 @@ export class NotificationService {
     mentionerId: string,
     mentionerUsername: string,
     mentionerAvatarURL: string,
-    refType: 'post' | 'comment' | 'story',
+    refType: 'post' | 'comment' | 'story' | 'message',
     refId: string,
     refPreview?: string,
     refMediaURL?: string
@@ -344,8 +533,7 @@ export class NotificationService {
   }
 
   /**
-   * Create or update aggregated story like notification
-   * This groups all likes on a story into one notification with latest 3 likers
+   * Create a story like notification (privacy-safe, one event per like)
    */
   async notifyStoryLike(
     storyOwnerId: string,
@@ -356,91 +544,41 @@ export class NotificationService {
     storyId: string,
     storyMediaURL?: string
   ): Promise<void> {
-    // Don't notify if user liked their own story
     if (storyOwnerId === likerId) return;
 
     try {
-      // Find existing story_like notification for this story
-      const notifsRef = collection(db, 'notifications');
-      const q = query(
-        notifsRef,
-        where('userId', '==', storyOwnerId),
-        where('type', '==', 'story_like'),
-        where('storyId', '==', storyId),
-        limit(1)
-      );
+      const notificationRef = doc(collection(db, 'notifications'));
+      const notificationId = notificationRef.id;
 
-      const snapshot = await getDocs(q);
-      
-      if (snapshot.empty) {
-        // Create new aggregated notification
-        const notificationRef = doc(collection(db, 'notifications'));
-        const notificationId = notificationRef.id;
+      const notificationData: any = {
+        notificationId,
+        userId: storyOwnerId,
+        recipientId: storyOwnerId,
+        type: 'story_like',
+        actorId: likerId,
+        actorUsername: likerUsername,
+        actorAvatarURL: likerAvatarURL,
+        actorVerified: likerVerified,
+        refType: 'story',
+        refId: storyId,
+        storyId,
+        totalLikesCount: 1,
+        isRead: false,
+        read: false,
+        createdAt: serverTimestamp(),
+      };
 
-        await setDoc(notificationRef, {
-          notificationId,
-          userId: storyOwnerId,
-          type: 'story_like',
-          actorId: likerId, // Most recent liker
-          actorUsername: likerUsername,
-          actorAvatarURL: likerAvatarURL,
-          actorVerified: likerVerified,
-          refType: 'story',
-          refId: storyId,
-          storyId,
-          refMediaURL: storyMediaURL,
-          likersData: [
-            {
-              userId: likerId,
-              username: likerUsername,
-              avatarURL: likerAvatarURL,
-              verified: likerVerified,
-              likedAt: Timestamp.fromDate(new Date()),
-            },
-          ],
-          totalLikesCount: 1,
-          isRead: false,
-          createdAt: serverTimestamp(),
-        });
-      } else {
-        // Update existing notification
-        const existingNotif = snapshot.docs[0];
-        const existingData = existingNotif.data();
-        const currentLikers = existingData.likersData || [];
-
-        // Check if this user already liked (don't duplicate)
-        const alreadyLiked = currentLikers.some(
-          (liker: any) => liker.userId === likerId
-        );
-
-        if (!alreadyLiked) {
-          // Add new liker to the beginning of the array
-          const updatedLikers = [
-            {
-              userId: likerId,
-              username: likerUsername,
-              avatarURL: likerAvatarURL,
-              verified: likerVerified,
-              likedAt: Timestamp.fromDate(new Date()),
-            },
-            ...currentLikers,
-          ].slice(0, 3); // Keep only latest 3
-
-          // Update notification with new data
-          await updateDoc(existingNotif.ref, {
-            actorId: likerId, // Most recent liker
-            actorUsername: likerUsername,
-            actorAvatarURL: likerAvatarURL,
-            actorVerified: likerVerified,
-            likersData: updatedLikers,
-            totalLikesCount: (existingData.totalLikesCount || 1) + 1,
-            isRead: false, // Mark as unread again
-            createdAt: serverTimestamp(), // Update timestamp to move to top
-          });
-        }
+      if (storyMediaURL) {
+        notificationData.refMediaURL = storyMediaURL;
       }
+
+      await setDoc(notificationRef, notificationData);
+
+      try {
+        void pushService.sendForNotification(notificationData);
+      } catch {}
     } catch (error) {
-      console.error('Failed to create/update story like notification:', error);
+      console.error('Failed to create story like notification:', error);
       throw error;
     }
   }
@@ -448,3 +586,9 @@ export class NotificationService {
 
 // Export singleton instance
 export const notificationService = new NotificationService();
+
+
+
+
+
+

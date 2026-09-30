@@ -49,9 +49,6 @@ export const useFollowActions = () => {
     setFollowing(true);
     try {
       await userService.followUser(currentUser.userId, userId);
-      cacheService.invalidateUserProfile(currentUser.userId);
-      cacheService.invalidateUserProfile(userId);
-      cacheService.invalidateFollowingList(currentUser.userId);
     } catch (error) {
       throw error;
     } finally {
@@ -65,9 +62,6 @@ export const useFollowActions = () => {
     setFollowing(true);
     try {
       await userService.unfollowUser(currentUser.userId, userId);
-      cacheService.invalidateUserProfile(currentUser.userId);
-      cacheService.invalidateUserProfile(userId);
-      cacheService.invalidateFollowingList(currentUser.userId);
     } catch (error) {
       console.error('Failed to unfollow user:', error);
       throw error;
@@ -161,3 +155,4 @@ export const useFollowing = (userId: string) => {
 
   return { followingIds, loading };
 };
+

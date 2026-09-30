@@ -1,20 +1,43 @@
-import { db } from '../config/firebase';
+import { db, storage } from '../config/firebase';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 
 export interface ReportData {
   reportType: 'post' | 'comment' | 'user' | 'glimpse' | 'story' | 'message';
-  targetId: string; // ID of reported item
-  targetAuthorId: string; // ID of the person who created the content
-  reporterId: string; // ID of person reporting
+  targetId: string;
+  targetAuthorId: string;
+  reporterId: string;
   reporterUsername: string;
-  category: string; // Main category
-  subcategory?: string; // Subcategory if applicable
-  customReason?: string; // Custom message if "Other" selected
+  category: string;
+  subcategory?: string;
+  customReason?: string;
   status: 'pending' | 'reviewed' | 'resolved' | 'dismissed';
   createdAt: any;
   reviewedAt?: any;
   reviewedBy?: string;
   notes?: string;
+}
+
+export interface SupportTicketAttachment {
+  url: string;
+  path: string;
+  mimeType: string;
+  fileName: string;
+  sizeBytes?: number;
+}
+
+export interface SupportTicketData {
+  ticketType: 'problem' | 'support';
+  userId: string;
+  username: string;
+  category: string;
+  message: string;
+  subject?: string;
+  contactEmail?: string;
+  attachments?: SupportTicketAttachment[];
+  platform: 'android' | 'ios' | 'web' | 'unknown';
+  status: 'open' | 'in_review' | 'resolved';
+  createdAt: any;
 }
 
 export const REPORT_CATEGORIES = {
@@ -111,10 +134,47 @@ export const REPORT_CATEGORIES = {
 };
 
 class ReportService {
+  private async uploadProblemAttachment(
+    userId: string,
+    attachment: {
+      uri: string;
+      mimeType?: string;
+      fileName?: string;
+      sizeBytes?: number;
+    },
+    index: number
+  ): Promise<SupportTicketAttachment> {
+    const sourceUri = attachment.uri;
+    if (!sourceUri) {
+      throw new Error('Attachment URI missing');
+    }
+
+    const mimeType = attachment.mimeType || 'image/jpeg';
+    const extension = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg';
+    const safeFileName = (attachment.fileName || `screenshot_${index + 1}.${extension}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storagePath = `support-reports/${userId}/${Date.now()}_${index}_${safeFileName}`;
+
+    const blob = await fetch(sourceUri).then((response) => response.blob());
+    const fileRef = ref(storage, storagePath);
+
+    await uploadBytes(fileRef, blob, {
+      contentType: mimeType,
+    });
+
+    const url = await getDownloadURL(fileRef);
+    return {
+      url,
+      path: storagePath,
+      mimeType,
+      fileName: safeFileName,
+      sizeBytes: attachment.sizeBytes,
+    };
+  }
+
   async submitReport(reportData: Omit<ReportData, 'status' | 'createdAt'>): Promise<string> {
     try {
       const reportsRef = collection(db, 'reports');
-      
+
       const report: ReportData = {
         ...reportData,
         status: 'pending',
@@ -122,13 +182,88 @@ class ReportService {
       };
 
       const docRef = await addDoc(reportsRef, report);
-      
-      console.log('✅ Report submitted:', docRef.id);
+
+      console.log('Report submitted:', docRef.id);
       return docRef.id;
     } catch (error) {
-      console.error('❌ Failed to submit report:', error);
+      console.error('Failed to submit report:', error);
       throw new Error('Failed to submit report');
     }
+  }
+
+  async submitSupportTicket(ticketData: Omit<SupportTicketData, 'status' | 'createdAt'>): Promise<string> {
+    try {
+      const ticketsRef = collection(db, 'supportTickets');
+      const ticket: SupportTicketData = {
+        ...ticketData,
+        status: 'open',
+        createdAt: serverTimestamp(),
+      };
+
+      const docRef = await addDoc(ticketsRef, ticket);
+      console.log('Support ticket submitted:', docRef.id);
+      return docRef.id;
+    } catch (error) {
+      console.error('Failed to submit support ticket:', error);
+      throw new Error('Failed to submit support ticket');
+    }
+  }
+
+  async submitProblemReport(
+    userId: string,
+    username: string,
+    category: string,
+    message: string,
+    platform: SupportTicketData['platform'] = 'unknown',
+    attachments?: Array<{
+      uri: string;
+      mimeType?: string;
+      fileName?: string;
+      sizeBytes?: number;
+    }>
+  ): Promise<string> {
+    const uploadedAttachments: SupportTicketAttachment[] = [];
+    if (attachments && attachments.length > 0) {
+      const safeAttachments = attachments.slice(0, 4);
+      for (let i = 0; i < safeAttachments.length; i += 1) {
+        try {
+          const uploaded = await this.uploadProblemAttachment(userId, safeAttachments[i], i);
+          uploadedAttachments.push(uploaded);
+        } catch (error) {
+          console.warn('[ReportService] Failed to upload attachment:', error);
+        }
+      }
+    }
+
+    return this.submitSupportTicket({
+      ticketType: 'problem',
+      userId,
+      username,
+      category,
+      message,
+      attachments: uploadedAttachments,
+      platform,
+    });
+  }
+
+  async submitSupportMessage(
+    userId: string,
+    username: string,
+    subject: string,
+    message: string,
+    contactEmail?: string,
+    platform: SupportTicketData['platform'] = 'unknown'
+  ): Promise<string> {
+    return this.submitSupportTicket({
+      ticketType: 'support',
+      userId,
+      username,
+      category: 'support',
+      subject,
+      message,
+      contactEmail,
+      platform,
+    });
   }
 
   async reportPost(

@@ -32,12 +32,37 @@ export class PostService {
     const postRef = doc(collection(db, 'posts'));
     const postId = postRef.id;
 
-    await setDoc(postRef, {
+    // Get user data to ensure we have the latest avatarURL
+    const userRef = doc(db, 'users', postData.authorId);
+    const userSnap = await getDoc(userRef);
+    const userData = userSnap.exists() ? userSnap.data() : null;
+    
+    console.log('📝 Creating post with author data:', {
+      authorId: postData.authorId,
+      authorUsername: postData.authorUsername,
+      providedAvatarURL: postData.authorAvatarURL,
+      userAvatarURL: userData?.avatarURL,
+      finalAvatarURL: userData?.avatarURL || postData.authorAvatarURL || ''
+    });
+
+    // Create post document
+    const post: Post = {
       postId,
-      ...postData,
+      postType: postData.postType || 'image',
+      authorId: postData.authorId,
+      authorUsername: postData.authorUsername,
+      authorAvatarURL: userData?.avatarURL || postData.authorAvatarURL || '',
+      authorVerified: userData?.verified || false,
+      caption: postData.caption,
+      mediaURLs: postData.mediaURLs || [],
+      mediaType: postData.mediaType || 'image',
+      thumbnailURL: postData.thumbnailURL,
+      aspectRatio: postData.aspectRatio || 1,
+      location: postData.location,
       tags: postData.tags || [],
       mentions: postData.mentions || [],
       taggedUsers: postData.taggedUsers || [],
+      collaborators: (postData as any).collaborators || [],
       altText: postData.altText || '',
       stats: {
         likesCount: 0,
@@ -46,17 +71,19 @@ export class PostService {
         sharesCount: 0,
         viewsCount: 0,
       },
-      commentsEnabled: true,
-      hideLikesCount: false,
+      commentsEnabled: (postData as any).commentsEnabled !== false,
+      hideLikesCount: (postData as any).hideLikesCount || false,
       engagement: 0,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-      lastEngagementAt: serverTimestamp(),
-    });
+      createdAt: serverTimestamp() as any,
+      updatedAt: serverTimestamp() as any,
+      lastEngagementAt: serverTimestamp() as any,
+    };
+
+    await setDoc(postRef, post);
 
     // Update user's post count
-    const userRef = doc(db, 'users', postData.authorId);
-    await updateDoc(userRef, {
+    const userUpdateRef = doc(db, 'users', postData.authorId);
+    await updateDoc(userUpdateRef, {
       'stats.postsCount': increment(1),
     });
 

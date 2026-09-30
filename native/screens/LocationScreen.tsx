@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Image, ActivityIndicator, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Dimensions } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { postService } from '../services/post.service';
-import { useAuth } from '../contexts/AuthContext';
+import { ScreenSkeleton } from '../components/ui/LoadingSkeleton';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 const { width } = Dimensions.get('window');
 const ITEM_SIZE = width / 3;
@@ -22,8 +24,8 @@ export default function LocationScreen() {
   const loadLocationPosts = async () => {
     setLoading(true);
     try {
-      const data = await postService.getPostsByLocation(location);
-      setPosts(data);
+      const data = await postService.getPostsByHashtag(location);
+      setPosts(data.posts || []);
     } finally {
       setLoading(false);
     }
@@ -43,12 +45,12 @@ export default function LocationScreen() {
       <View style={styles.info}>
         <Text style={styles.count}>{posts.length} posts</Text>
       </View>
-      {loading ? <ActivityIndicator size="large" color="#3b82f6" style={{ flex: 1 }} /> : (
-        <FlatList
+      {loading ? <ScreenSkeleton variant="grid" rows={6} /> : (
+        <FlashList estimatedItemSize={100}
           data={posts}
           numColumns={3}
           renderItem={({ item }) => (
-            <TouchableOpacity onPress={() => navigation.navigate('PostView' as never, { postId: item.postId } as never)}>
+            <TouchableOpacity onPress={() => (navigation as any).navigate('PostView', { postId: item.postId })}>
               <Image source={{ uri: item.mediaURLs?.[0] }} style={styles.img} />
             </TouchableOpacity>
           )}
@@ -67,3 +69,6 @@ const styles = StyleSheet.create({
   count: { fontSize: 14, color: '#6b7280' },
   img: { width: ITEM_SIZE, height: ITEM_SIZE },
 });
+
+
+

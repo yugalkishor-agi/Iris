@@ -51,7 +51,7 @@ export default function OnboardingScreen({ navigation }: any) {
 
       <View style={styles.content}>
         <View style={styles.iconContainer}>
-          <LinearGradient colors={slide.colors} style={styles.iconGradient}>
+          <LinearGradient colors={slide.colors as [string, string, ...string[]]} style={styles.iconGradient}>
             <Ionicons name={slide.icon} size={64} color="#fff" />
           </LinearGradient>
         </View>

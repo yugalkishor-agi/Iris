@@ -1,18 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TouchableOpacity,
-  Image,
-  ActivityIndicator,
-  Dimensions,
-} from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Dimensions } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../contexts/AuthContext';
 import { postService } from '../services/post.service';
+import { userService } from '../services/user.service';
+import { ScreenSkeleton } from '../components/ui/LoadingSkeleton';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 const { width } = Dimensions.get('window');
 const ITEM_WIDTH = width / 3;
@@ -32,8 +27,14 @@ export default function LikedPostsScreen() {
     
     setLoading(true);
     try {
-      const posts = await postService.getLikedPosts(user.userId);
-      setLikedPosts(posts);
+      const followingIds = await userService.getFollowing(user.userId);
+      const feedAuthors = Array.from(new Set([user.userId, ...followingIds])).slice(0, 10);
+      const { posts } = await postService.getFeedPosts(feedAuthors, user.userId, 100);
+      const likedIds = await postService.getUserLikedPosts(
+        user.userId,
+        posts.map((p) => p.postId).filter(Boolean)
+      );
+      setLikedPosts(posts.filter((p) => likedIds.includes(p.postId)));
     } catch (error) {
       console.error('Failed to load liked posts:', error);
     } finally {
@@ -44,9 +45,9 @@ export default function LikedPostsScreen() {
   const renderPost = ({ item }: { item: any }) => (
     <TouchableOpacity
       style={styles.postItem}
-      onPress={() => navigation.navigate('PostView' as never, { postId: item.postId } as never)}
+      onPress={() => (navigation as any).navigate('PostView', { postId: item.postId })}
     >
-      <Image source={{ uri: item.mediaURLs?.[0] || 'https://via.placeholder.com/150' }} style={styles.postImage} />
+        <Image source={{ uri: item.mediaURLs?.[0] || '' }} style={styles.postImage} />
       <View style={styles.overlay}>
         <Ionicons name="heart" size={20} color="#fff" />
       </View>
@@ -64,9 +65,7 @@ export default function LikedPostsScreen() {
       </View>
 
       {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#3b82f6" />
-        </View>
+        <ScreenSkeleton variant="grid" rows={6} />
       ) : likedPosts.length === 0 ? (
         <View style={styles.emptyContainer}>
           <Ionicons name="heart-outline" size={64} color="#d1d5db" />
@@ -74,12 +73,12 @@ export default function LikedPostsScreen() {
           <Text style={styles.emptyDescription}>Posts you like will appear here</Text>
         </View>
       ) : (
-        <FlatList
+        <FlashList estimatedItemSize={100}
           data={likedPosts}
           renderItem={renderPost}
           keyExtractor={(item) => item.postId}
           numColumns={3}
-          contentContainerStyle={styles.grid}
+          contentContainerStyle={styles.grid as any}
         />
       )}
     </View>
@@ -101,3 +100,6 @@ const styles = StyleSheet.create({
   postImage: { width: '100%', height: '100%' },
   overlay: { position: 'absolute', top: 8, right: 8, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 20, padding: 4 },
 });
+
+
+

@@ -4,10 +4,11 @@
     "slug": "iris-native",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./public/icon.png",
+    "icon": "./public/Iris-logo.png",
+    "jsEngine": "hermes",
     "userInterfaceStyle": "automatic",
     "splash": {
-      "image": "./public/icon.png",
+      "image": "./public/Iris-logo-splesh-screen.png",
       "resizeMode": "contain",
       "backgroundColor": "#0D0D0D"
     },
@@ -20,14 +21,13 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./public/icon.png",
+        "foregroundImage": "./public/Iris-logo.png",
         "backgroundColor": "#0D0D0D"
       },
+      "googleServicesFile": "./android-google-services.json",
       "package": "com.iris.app",
       "permissions": [
         "CAMERA",
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE",
         "RECORD_AUDIO"
       ]
     },
@@ -41,7 +41,17 @@
       }
     },
     "plugins": [
-      "expo-font"
+      "expo-font",
+      "expo-asset",
+      [
+        "expo-notifications",
+        {
+          "icon": "./public/notification-icon.png",
+          "color": "#EC4899",
+          "sounds": [],
+          "mode": "production"
+        }
+      ]
     ]
   }
 }

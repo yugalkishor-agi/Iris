@@ -1,73 +1,240 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, ScrollView, Alert, StyleSheet } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import {
+  Alert,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { cacheService } from '../services/cache.service';
+import { useColors, spacing, typography, borderRadius } from '../styles/theme';
+
+type CacheBucket = {
+  key: string;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  prefix: string;
+  count: number;
+};
+
+const BUCKET_DEFS: Omit<CacheBucket, 'count'>[] = [
+  { key: 'user', label: 'User Cache', icon: 'person-circle', prefix: 'user:' },
+  { key: 'post', label: 'Post Cache', icon: 'images', prefix: 'post:' },
+  { key: 'feed', label: 'Feed Cache', icon: 'newspaper', prefix: 'feed:' },
+  { key: 'following', label: 'Following Cache', icon: 'people', prefix: 'following:' },
+];
 
 export default function CacheManagementScreen() {
   const navigation = useNavigation();
+  const themeColors = useColors();
+  const styles = useMemo(() => createStyles(themeColors), [themeColors]);
+  const [version, setVersion] = useState(0);
 
-  const handleClearCache = (type: string) => {
-    Alert.alert('Clear Cache', `Clear ${type} cache?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Clear',
-        onPress: () => Alert.alert('Cleared', `${type} cache has been cleared`),
-      },
-    ]);
+  const buckets: CacheBucket[] = useMemo(() => {
+    const stats = cacheService.getPrefixStats(BUCKET_DEFS.map((item) => item.prefix));
+    return BUCKET_DEFS.map((item) => ({
+      ...item,
+      count: stats.find((stat) => stat.prefix === item.prefix)?.count || 0,
+    }));
+  }, [version]);
+
+  const totalEntries = cacheService.getSize();
+  const knownCount = buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+  const otherCount = Math.max(totalEntries - knownCount, 0);
+
+  const refresh = () => setVersion((prev) => prev + 1);
+
+  const confirmClearBucket = (bucket: CacheBucket) => {
+    Alert.alert(
+      'Clear Cache',
+      `Remove ${bucket.label.toLowerCase()} entries?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: () => {
+            const removed = cacheService.clearByPrefix(bucket.prefix);
+            Alert.alert('Cache Cleared', `${removed} entries removed from ${bucket.label}.`);
+            refresh();
+          },
+        },
+      ]
+    );
+  };
+
+  const clearAll = () => {
+    Alert.alert(
+      'Clear All Cache',
+      'This will remove all in-memory cache entries.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear All',
+          style: 'destructive',
+          onPress: () => {
+            cacheService.clear();
+            refresh();
+            Alert.alert('Done', 'All cache entries cleared.');
+          },
+        },
+      ]
+    );
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={28} color="#000" />
+          <Ionicons name="chevron-back" size={24} color={themeColors.text.primary} />
         </TouchableOpacity>
         <Text style={styles.title}>Cache Management</Text>
-        <View style={{ width: 28 }} />
+        <TouchableOpacity onPress={refresh}>
+          <Ionicons name="refresh" size={20} color={themeColors.text.primary} />
+        </TouchableOpacity>
       </View>
-      <ScrollView contentContainerStyle={styles.content}>
-        <View style={styles.card}>
-          <Ionicons name="image" size={32} color="#3b82f6" />
-          <Text style={styles.cardTitle}>Image Cache</Text>
-          <Text style={styles.cardSize}>450 MB</Text>
-          <TouchableOpacity style={styles.btn} onPress={() => handleClearCache('Image')}>
-            <Text style={styles.btnText}>Clear</Text>
-          </TouchableOpacity>
+
+      <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer as any}>
+        <View style={styles.summaryCard}>
+          <Text style={styles.summaryTitle}>Total Cached Entries</Text>
+          <Text style={styles.summaryValue}>{totalEntries}</Text>
+          <Text style={styles.summaryMeta}>Other entries: {otherCount}</Text>
         </View>
-        <View style={styles.card}>
-          <Ionicons name="videocam" size={32} color="#8b5cf6" />
-          <Text style={styles.cardTitle}>Video Cache</Text>
-          <Text style={styles.cardSize}>120 MB</Text>
-          <TouchableOpacity style={styles.btn} onPress={() => handleClearCache('Video')}>
-            <Text style={styles.btnText}>Clear</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.card}>
-          <Ionicons name="document" size={32} color="#f59e0b" />
-          <Text style={styles.cardTitle}>App Cache</Text>
-          <Text style={styles.cardSize}>85 MB</Text>
-          <TouchableOpacity style={styles.btn} onPress={() => handleClearCache('App')}>
-            <Text style={styles.btnText}>Clear</Text>
-          </TouchableOpacity>
-        </View>
-        <TouchableOpacity style={styles.clearAllBtn} onPress={() => handleClearCache('All')}>
+
+        {buckets.map((bucket) => (
+          <View key={bucket.key} style={styles.itemCard}>
+            <View style={styles.itemInfo}>
+              <Ionicons name={bucket.icon} size={24} color={themeColors.accent.primary} />
+              <View style={styles.itemTextBlock}>
+                <Text style={styles.itemTitle}>{bucket.label}</Text>
+                <Text style={styles.itemMeta}>{bucket.count} entries</Text>
+              </View>
+            </View>
+            <TouchableOpacity
+              style={[styles.clearButton, bucket.count === 0 && styles.clearButtonDisabled]}
+              onPress={() => confirmClearBucket(bucket)}
+              disabled={bucket.count === 0}
+            >
+              <Text style={styles.clearButtonText}>Clear</Text>
+            </TouchableOpacity>
+          </View>
+        ))}
+
+        <TouchableOpacity style={styles.clearAllButton} onPress={clearAll}>
           <Text style={styles.clearAllText}>Clear All Cache</Text>
         </TouchableOpacity>
       </ScrollView>
-    </View>
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f9fafb' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
-  title: { fontSize: 18, fontWeight: '600' },
-  content: { padding: 16 },
-  card: { backgroundColor: '#fff', borderRadius: 12, padding: 24, alignItems: 'center', marginBottom: 16 },
-  cardTitle: { fontSize: 16, fontWeight: '600', marginTop: 12, marginBottom: 4 },
-  cardSize: { fontSize: 14, color: '#6b7280', marginBottom: 16 },
-  btn: { backgroundColor: '#3b82f6', paddingHorizontal: 24, paddingVertical: 10, borderRadius: 8 },
-  btnText: { color: '#fff', fontWeight: '600' },
-  clearAllBtn: { backgroundColor: '#ef4444', padding: 16, borderRadius: 8, alignItems: 'center', marginTop: 8 },
-  clearAllText: { color: '#fff', fontSize: 16, fontWeight: '600' },
-});
+const createStyles = (themeColors: ReturnType<typeof useColors>) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: themeColors.background.primary,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.md,
+      borderBottomWidth: 1,
+      borderBottomColor: themeColors.border.subtle,
+    },
+    title: {
+      fontSize: typography.fontSize.lg,
+      fontWeight: typography.fontWeight.semibold as any,
+      color: themeColors.text.primary,
+    },
+    content: {
+      flex: 1,
+    },
+    contentContainer: {
+      padding: spacing.lg,
+      gap: spacing.md,
+    },
+    summaryCard: {
+      backgroundColor: themeColors.background.secondary,
+      borderWidth: 1,
+      borderColor: themeColors.border.light,
+      borderRadius: borderRadius.md,
+      padding: spacing.lg,
+      alignItems: 'center',
+    },
+    summaryTitle: {
+      fontSize: typography.fontSize.sm,
+      color: themeColors.text.secondary,
+    },
+    summaryValue: {
+      fontSize: 40,
+      color: themeColors.accent.primary,
+      fontWeight: typography.fontWeight.bold as any,
+      marginVertical: spacing.xs,
+    },
+    summaryMeta: {
+      fontSize: typography.fontSize.sm,
+      color: themeColors.text.secondary,
+    },
+    itemCard: {
+      backgroundColor: themeColors.background.secondary,
+      borderWidth: 1,
+      borderColor: themeColors.border.light,
+      borderRadius: borderRadius.md,
+      padding: spacing.md,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    itemInfo: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.md,
+      flex: 1,
+    },
+    itemTextBlock: {
+      flex: 1,
+    },
+    itemTitle: {
+      fontSize: typography.fontSize.base,
+      color: themeColors.text.primary,
+      fontWeight: typography.fontWeight.semibold as any,
+    },
+    itemMeta: {
+      fontSize: typography.fontSize.sm,
+      color: themeColors.text.secondary,
+      marginTop: 2,
+    },
+    clearButton: {
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.sm,
+      borderRadius: borderRadius.sm,
+      backgroundColor: themeColors.accent.primary,
+    },
+    clearButtonDisabled: {
+      opacity: 0.4,
+    },
+    clearButtonText: {
+      color: '#fff',
+      fontSize: typography.fontSize.sm,
+      fontWeight: typography.fontWeight.semibold as any,
+    },
+    clearAllButton: {
+      marginTop: spacing.md,
+      borderRadius: borderRadius.md,
+      backgroundColor: themeColors.accent.error,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: spacing.md,
+    },
+    clearAllText: {
+      color: '#fff',
+      fontSize: typography.fontSize.base,
+      fontWeight: typography.fontWeight.semibold as any,
+    },
+  });

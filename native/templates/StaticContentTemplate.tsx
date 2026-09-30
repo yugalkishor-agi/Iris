@@ -28,7 +28,7 @@ export function createStaticContentScreen(config: StaticContentTemplateProps) {
           <View style={styles.placeholder} />
         </View>
 
-        <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer}>
+        <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer as any}>
           {typeof config.content === 'string' ? (
             <Text style={styles.text}>{config.content}</Text>
           ) : (

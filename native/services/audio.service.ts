@@ -239,10 +239,13 @@ class AudioService {
 
       // Remove old preloaded audio if exceeds limit
       if (this.preloadedAudio.size > this.PRELOAD_COUNT) {
-        const firstKey = this.preloadedAudio.keys().next().value;
-        const oldAudio = this.preloadedAudio.get(firstKey);
-        oldAudio?.pause();
-        this.preloadedAudio.delete(firstKey);
+        const iter = this.preloadedAudio.keys().next();
+        if (!iter.done) {
+          const firstKey = iter.value as string;
+          const oldAudio = this.preloadedAudio.get(firstKey);
+          oldAudio?.pause();
+          this.preloadedAudio.delete(firstKey);
+        }
       }
     } catch (error) {
       console.error('Preload failed:', error);

@@ -7,23 +7,23 @@ export default createSettingsScreen({
     {
       title: 'Data Saver',
       items: [
-        { label: 'Data Saver Mode', type: 'toggle', icon: 'speedometer', value: false, onToggle: (v) => console.log('Saver:', v) },
-        { label: 'Only Load on WiFi', type: 'toggle', icon: 'wifi', value: false, onToggle: (v) => console.log('WiFi:', v) },
+        { label: 'Data Saver Mode', type: 'toggle', icon: 'speedometer', value: false, settingKey: 'dataSaverMode', settingScope: 'settings' },
+        { label: 'Only Load on WiFi', type: 'toggle', icon: 'wifi', value: false, settingKey: 'wifiOnlyLoad', settingScope: 'settings' },
       ],
     },
     {
       title: 'Media Quality',
       items: [
-        { label: 'Auto Download Photos', type: 'toggle', icon: 'image', value: true, onToggle: (v) => console.log('Photos:', v) },
-        { label: 'Auto Download Videos', type: 'toggle', icon: 'videocam', value: false, onToggle: (v) => console.log('Videos:', v) },
-        { label: 'HD on Cellular', type: 'toggle', icon: 'cellular', value: false, onToggle: (v) => console.log('HD:', v) },
+        { label: 'Auto Download Photos', type: 'toggle', icon: 'image', value: true, settingKey: 'autoDownloadPhotos', settingScope: 'settings' },
+        { label: 'Auto Download Videos', type: 'toggle', icon: 'videocam', value: false, settingKey: 'autoDownloadVideos', settingScope: 'settings' },
+        { label: 'HD on Cellular', type: 'toggle', icon: 'cellular', value: false, settingKey: 'hdOnCellular', settingScope: 'settings' },
       ],
     },
     {
       title: 'Storage',
       items: [
         { label: 'Storage Usage', type: 'navigation', icon: 'server', navigateTo: 'StorageUsage' },
-        { label: 'Clear Cache', type: 'action', icon: 'trash', onPress: () => console.log('Clear cache') },
+        { label: 'Clear Cache', type: 'navigation', icon: 'trash', navigateTo: 'CacheManagement' },
       ],
     },
   ],

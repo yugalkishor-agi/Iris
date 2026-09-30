@@ -17,8 +17,8 @@ export default createSettingsScreen({
       title: 'Preferences',
       items: [
         { label: 'Notifications', type: 'navigation', icon: 'notifications', navigateTo: 'NotificationSettings' },
-        { label: 'Appearance', type: 'navigation', icon: 'color-palette', navigateTo: 'AppearanceSettings' },
-        { label: 'Language', type: 'navigation', icon: 'language', navigateTo: 'LanguageSettings' },
+        { label: 'Appearance', type: 'navigation', icon: 'color-palette', navigateTo: 'AppearanceSettings', badge: 'Coming soon', disabled: true },
+        { label: 'Language', type: 'navigation', icon: 'language', navigateTo: 'LanguageSettings', badge: 'Coming soon', disabled: true },
         { label: 'Accessibility', type: 'navigation', icon: 'accessibility', navigateTo: 'Accessibility' },
         { label: 'Data Usage', type: 'navigation', icon: 'cellular', navigateTo: 'DataUsage' },
       ],
@@ -50,3 +50,4 @@ export default createSettingsScreen({
     },
   ],
 });
+

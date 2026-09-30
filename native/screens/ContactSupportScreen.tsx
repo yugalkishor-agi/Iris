@@ -1,74 +1,233 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, ScrollView } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+﻿import React, { useMemo, useState } from 'react';
+import {
+  Alert,
+  Platform,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useNavigation } from '@react-navigation/native';
 import { useAuth } from '../contexts/AuthContext';
+import { ButtonLoadingSkeleton } from '../components/ui/LoadingSkeleton';
+import { reportService } from '../services/report.service';
+import { spacing, typography, useColors } from '../styles/theme';
 
 export default function ContactSupportScreen() {
-  const navigation = useNavigation();
+  const navigation = useNavigation<any>();
   const { user } = useAuth();
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const [subject, setSubject] = useState('');
   const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async () => {
-    if (!subject || !message) {
-      Alert.alert('Error', 'Please fill in all fields');
+    if (!user || submitting) return;
+
+    const trimmedSubject = subject.trim();
+    const trimmedMessage = message.trim();
+    if (trimmedSubject.length < 4 || trimmedMessage.length < 12) {
+      Alert.alert('More detail needed', 'Add a short subject and a clear message before sending.');
       return;
     }
-    setLoading(true);
+
     try {
-      // Call support service
-      Alert.alert('Sent', 'Your message has been sent to support. We will get back to you soon!');
+      setSubmitting(true);
+      await reportService.submitSupportMessage(
+        user.userId,
+        user.username,
+        trimmedSubject,
+        trimmedMessage,
+        user.email,
+        Platform.OS === 'android' || Platform.OS === 'ios' || Platform.OS === 'web' ? Platform.OS : 'unknown'
+      );
+      Alert.alert('Sent', 'Support has received your message.');
       navigation.goBack();
+    } catch (error) {
+      console.error('Failed to contact support:', error);
+      Alert.alert('Send failed', 'Support could not be reached right now. Try again shortly.');
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={28} color="#000" />
+        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerButton} activeOpacity={0.75}>
+          <Ionicons name="chevron-back" size={24} color={c.text.primary} />
         </TouchableOpacity>
-        <Text style={styles.title}>Contact Support</Text>
-        <View style={{ width: 28 }} />
+        <Text style={styles.headerTitle}>Contact Support</Text>
+        <View style={styles.headerButton} />
       </View>
-      <ScrollView style={styles.content}>
-        <View style={styles.info}>
-          <Ionicons name="mail" size={32} color="#3b82f6" />
-          <Text style={styles.infoText}>We're here to help! Send us a message and we'll get back to you within 24 hours.</Text>
+
+      <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer as any} showsVerticalScrollIndicator={false}>
+        <View style={styles.heroCard}>
+          <Text style={styles.heroTitle}>Human support intake</Text>
+          <Text style={styles.heroText}>
+            Use this when you need account help, moderation follow-up, or assistance that does not fit a bug report.
+          </Text>
+          <View style={styles.heroPillRow}>
+            <View style={styles.heroPill}>
+              <Text style={styles.heroPillText}>No background sync</Text>
+            </View>
+            <View style={styles.heroPill}>
+              <Text style={styles.heroPillText}>One ticket</Text>
+            </View>
+          </View>
         </View>
-        <Text style={styles.label}>Subject</Text>
-        <TextInput style={styles.input} value={subject} onChangeText={setSubject} placeholder="What do you need help with?" />
-        <Text style={styles.label}>Message</Text>
-        <TextInput
-          style={styles.textArea}
-          value={message}
-          onChangeText={setMessage}
-          placeholder="Describe your issue in detail..."
-          multiline
-          numberOfLines={8}
-        />
-        <TouchableOpacity style={styles.btn} onPress={handleSubmit} disabled={loading}>
-          <Text style={styles.btnText}>{loading ? 'Sending...' : 'Send Message'}</Text>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Subject</Text>
+          <View style={styles.inputCard}>
+            <TextInput
+              style={styles.input}
+              value={subject}
+              onChangeText={setSubject}
+              placeholder="What do you need help with?"
+              placeholderTextColor={c.text.muted}
+              maxLength={120}
+            />
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Message</Text>
+          <View style={styles.textAreaCard}>
+            <TextInput
+              style={styles.textArea}
+              value={message}
+              onChangeText={setMessage}
+              placeholder="Describe the issue, account state, and what you already tried."
+              placeholderTextColor={c.text.muted}
+              multiline
+              textAlignVertical="top"
+              maxLength={1500}
+            />
+            <Text style={styles.counter}>{message.trim().length}/1500</Text>
+          </View>
+        </View>
+
+        <View style={styles.tipCard}>
+          <Ionicons name="mail-open" size={18} color={c.accent.primary} />
+          <Text style={styles.tipText}>Responses can only help if the message includes the affected screen or account action.</Text>
+        </View>
+
+        <TouchableOpacity style={[styles.submitButton, submitting && styles.submitButtonDisabled]} onPress={handleSubmit} disabled={submitting} activeOpacity={0.82}>
+          {submitting ? <ButtonLoadingSkeleton width={88} /> : <Text style={styles.submitButtonText}>Send Message</Text>}
         </TouchableOpacity>
       </ScrollView>
-    </View>
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
-  title: { fontSize: 18, fontWeight: '600' },
-  content: { flex: 1, padding: 16 },
-  info: { backgroundColor: '#eff6ff', padding: 20, borderRadius: 12, alignItems: 'center', marginBottom: 24 },
-  infoText: { fontSize: 14, color: '#1e3a8a', textAlign: 'center', marginTop: 12, lineHeight: 20 },
-  label: { fontSize: 14, fontWeight: '600', marginBottom: 8, marginTop: 16 },
-  input: { borderWidth: 1, borderColor: '#d1d5db', borderRadius: 8, padding: 12, fontSize: 15 },
-  textArea: { borderWidth: 1, borderColor: '#d1d5db', borderRadius: 8, padding: 12, fontSize: 15, minHeight: 160, textAlignVertical: 'top' },
-  btn: { backgroundColor: '#3b82f6', padding: 16, borderRadius: 8, alignItems: 'center', marginTop: 24 },
-  btnText: { color: '#fff', fontWeight: '600', fontSize: 16 },
-});
+const createStyles = (c: ReturnType<typeof useColors>) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: c.background.primary },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 18,
+      paddingVertical: 14,
+      borderBottomWidth: 1,
+      borderBottomColor: c.border.subtle,
+    },
+    headerButton: { width: 28, alignItems: 'center', justifyContent: 'center' },
+    headerTitle: { fontSize: typography.fontSize.lg, fontWeight: '700' as any, color: c.text.primary },
+    content: { flex: 1 },
+    contentContainer: { paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.xl },
+    heroCard: {
+      backgroundColor: c.background.tertiary,
+      borderRadius: 24,
+      borderWidth: 1,
+      borderColor: c.border.subtle,
+      padding: spacing.lg,
+      marginBottom: spacing.xl,
+    },
+    heroTitle: { fontSize: typography.fontSize.lg, fontWeight: '700' as any, color: c.text.primary, marginBottom: 6 },
+    heroText: { fontSize: typography.fontSize.sm, lineHeight: 20, color: c.text.secondary, marginBottom: spacing.md },
+    heroPillRow: { flexDirection: 'row', flexWrap: 'wrap' },
+    heroPill: {
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+      marginRight: spacing.sm,
+      marginBottom: spacing.xs,
+      backgroundColor: c.background.secondary,
+      borderWidth: 1,
+      borderColor: c.border.subtle,
+    },
+    heroPillText: { fontSize: 12, fontWeight: '700' as any, color: c.text.primary },
+    section: { marginBottom: spacing.xl },
+    sectionTitle: {
+      fontSize: 12,
+      fontWeight: '700' as any,
+      color: c.text.muted,
+      marginBottom: spacing.sm,
+      textTransform: 'uppercase',
+      letterSpacing: 0.7,
+      paddingHorizontal: 4,
+    },
+    inputCard: {
+      backgroundColor: c.background.tertiary,
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: c.border.subtle,
+      paddingHorizontal: spacing.lg,
+      minHeight: 56,
+      justifyContent: 'center',
+    },
+    input: { color: c.text.primary, fontSize: typography.fontSize.base },
+    textAreaCard: {
+      backgroundColor: c.background.tertiary,
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: c.border.subtle,
+      padding: spacing.lg,
+    },
+    textArea: {
+      minHeight: 180,
+      color: c.text.primary,
+      fontSize: typography.fontSize.base,
+      lineHeight: 22,
+    },
+    counter: {
+      marginTop: spacing.sm,
+      textAlign: 'right',
+      color: c.text.muted,
+      fontSize: typography.fontSize.xs,
+      fontWeight: '600' as any,
+    },
+    tipCard: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      backgroundColor: c.background.tertiary,
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: c.border.subtle,
+      padding: spacing.md,
+      marginBottom: spacing.xl,
+    },
+    tipText: {
+      flex: 1,
+      marginLeft: spacing.sm,
+      fontSize: typography.fontSize.sm,
+      lineHeight: 20,
+      color: c.text.secondary,
+    },
+    submitButton: {
+      height: 54,
+      borderRadius: 18,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.accent.primary,
+    },
+    submitButtonDisabled: { opacity: 0.72 },
+    submitButtonText: { color: '#FFFFFF', fontSize: typography.fontSize.base, fontWeight: '700' as any },
+  });

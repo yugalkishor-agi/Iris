@@ -1,17 +1,24 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Image, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, SafeAreaView, RefreshControl, Alert } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../contexts/AuthContext';
-import { suggestionService } from '../services/suggestion.service';
 import { userService } from '../services/user.service';
+import { colors, spacing, typography } from '../styles/theme';
+import { ScreenSkeleton } from '../components/ui/LoadingSkeleton';
+import { Avatar } from '../components/ui/Avatar';
+import type { User } from '../types/database';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 export default function SuggestionsScreen() {
   const navigation = useNavigation();
   const { user } = useAuth();
   const [suggestions, setSuggestions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [following, setFollowing] = useState<Set<string>>(new Set());
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   useEffect(() => {
     loadSuggestions();
@@ -21,12 +28,37 @@ export default function SuggestionsScreen() {
     if (!user) return;
     setLoading(true);
     try {
-      const data = await suggestionService.getSuggestedUsers(user.userId, 20);
-      setSuggestions(data);
+      // Get suggested users based on followers and following
+      const followingIds = await userService.getFollowing(user.userId);
+      const followerIds = await userService.getFollowers(user.userId);
+      
+      // Simple suggestion algorithm - get users from followers' networks
+      const allUserIds = [...followingIds, ...followerIds];
+      const uniqueUserIds = Array.from(new Set(allUserIds))
+        .filter(id => id !== user.userId)
+        .slice(0, 20);
+      
+      // Fetch user details for suggestions
+      const userPromises = uniqueUserIds.map(id => userService.getUser(id));
+      const users = await Promise.all(userPromises);
+      const validUsers = users.filter((u): u is User => u !== null);
+      
+      setSuggestions(validUsers);
+      
+      // Set following status
+      setFollowing(new Set(followingIds));
+    } catch (error) {
+      console.error('Failed to load suggestions:', error);
     } finally {
       setLoading(false);
     }
   };
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadSuggestions();
+    setRefreshing(false);
+  }, []);
 
   const handleFollow = async (userId: string) => {
     if (!user) return;
@@ -49,12 +81,12 @@ export default function SuggestionsScreen() {
         <Text style={styles.title}>Suggested for You</Text>
         <View style={{ width: 28 }} />
       </View>
-      {loading ? <ActivityIndicator size="large" color="#3b82f6" style={{ flex: 1 }} /> : (
-        <FlatList
+      {loading ? <ScreenSkeleton variant="list" rows={6} /> : (
+        <FlashList estimatedItemSize={100}
           data={suggestions}
           renderItem={({ item }) => (
             <View style={styles.item}>
-              <TouchableOpacity style={styles.user} onPress={() => navigation.navigate('Profile' as never, { userId: item.userId } as never)}>
+              <TouchableOpacity style={styles.user} onPress={() => (navigation as any).navigate('UserProfile', { userId: item.userId })}>
                 <Image source={{ uri: item.avatarURL }} style={styles.avatar} />
                 <View style={{ flex: 1 }}>
                   <Text style={styles.name}>{item.displayName}</Text>
@@ -96,3 +128,6 @@ const styles = StyleSheet.create({
   btnText: { color: '#fff', fontWeight: '600', fontSize: 14 },
   btnTextFollowing: { color: '#374151' },
 });
+
+
+

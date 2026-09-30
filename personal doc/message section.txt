@@ -1,7 +1,0 @@
-seen - working
-active - working
-message send/recive - working
-ui message section - improving in future
-chat ui - improving in future
-glimpses share - working but some issue
-reply to msg - working

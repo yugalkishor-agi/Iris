@@ -2,6 +2,14 @@ import React from 'react';
 import { Text, View, StyleSheet } from 'react-native';
 import { createStaticContentScreen } from '../templates/StaticContentTemplate';
 
+const styles = StyleSheet.create({
+  heading: { fontSize: 32, fontWeight: '700', color: '#000', textAlign: 'center', marginBottom: 8 },
+  version: { fontSize: 14, color: '#6b7280', textAlign: 'center', marginBottom: 4 },
+  tagline: { fontSize: 16, color: '#3b82f6', textAlign: 'center', marginBottom: 32, fontStyle: 'italic' },
+  section: { fontSize: 18, fontWeight: '600', color: '#000', marginTop: 24, marginBottom: 12 },
+  paragraph: { fontSize: 15, lineHeight: 24, color: '#374151' },
+});
+
 export default createStaticContentScreen({
   title: 'About',
   content: (
@@ -31,12 +39,4 @@ export default createStaticContentScreen({
       </Text>
     </View>
   ),
-});
-
-const styles = StyleSheet.create({
-  heading: { fontSize: 32, fontWeight: '700', color: '#000', textAlign: 'center', marginBottom: 8 },
-  version: { fontSize: 14, color: '#6b7280', textAlign: 'center', marginBottom: 4 },
-  tagline: { fontSize: 16, color: '#3b82f6', textAlign: 'center', marginBottom: 32, fontStyle: 'italic' },
-  section: { fontSize: 18, fontWeight: '600', color: '#000', marginTop: 24, marginBottom: 12 },
-  paragraph: { fontSize: 15, lineHeight: 24, color: '#374151' },
 });

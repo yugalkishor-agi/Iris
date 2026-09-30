@@ -15,7 +15,7 @@ export default function AchievementsScreen() {
         <Text style={styles.title}>Achievements</Text>
         <View style={{ width: 28 }} />
       </View>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={styles.content as any}>
         <View style={styles.card}>
           <Ionicons name="trophy" size={48} color="#f59e0b" />
           <Text style={styles.cardTitle}>100 Posts</Text>

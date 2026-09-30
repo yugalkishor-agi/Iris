@@ -1,8 +1,10 @@
+import { InlineLoadingSkeleton, ButtonLoadingSkeleton } from '../components/ui/LoadingSkeleton';
 import { useState, useEffect } from "react";
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Image, ActivityIndicator, ScrollView, KeyboardAvoidingView, Platform } from "react-native";
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, ScrollView, KeyboardAvoidingView, Platform, Alert } from "react-native";
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from "../contexts/AuthContext";
+import { Image } from 'expo-image';
 
 export default function SignupScreen({ navigation }: any) {
   const [showPassword, setShowPassword] = useState(false);
@@ -66,9 +68,10 @@ export default function SignupScreen({ navigation }: any) {
         formData.username,
         formData.name
       );
-      navigation.replace("Main");
+      Alert.alert("Account created!", "Welcome to Iris. Let's get started!");
+      // Navigation will happen automatically when auth state updates
     } catch (error: any) {
-      alert(error.message || "Could not create account. Please try again.");
+      Alert.alert("Signup failed", error.message || "Could not create account. Please try again.");
     } finally {
       setCheckingAvailability(false);
     }
@@ -80,7 +83,7 @@ export default function SignupScreen({ navigation }: any) {
 
   const pickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'],
       allowsEditing: true,
       aspect: [1, 1],
       quality: 0.8,
@@ -97,7 +100,7 @@ export default function SignupScreen({ navigation }: any) {
       style={styles.container}
     >
       <ScrollView 
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={styles.scrollContent as any}
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.header}>
@@ -110,7 +113,7 @@ export default function SignupScreen({ navigation }: any) {
           <Image
             source={require('../../public/Iris-logo.png')}
             style={styles.logo}
-            resizeMode="contain"
+            contentFit="contain"
           />
           <View style={styles.spacer} />
         </View>
@@ -228,9 +231,9 @@ export default function SignupScreen({ navigation }: any) {
               disabled={loading || checkingAvailability}
             >
               {checkingAvailability ? (
-                <ActivityIndicator color="#000" />
+                <InlineLoadingSkeleton />
               ) : loading ? (
-                <ActivityIndicator color="#000" />
+                <InlineLoadingSkeleton />
               ) : (
                 <Text style={styles.signupButtonText}>Sign Up</Text>
               )}
@@ -258,7 +261,7 @@ export default function SignupScreen({ navigation }: any) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0D0D0D',
+    backgroundColor: '#000',
   },
   scrollContent: {
     flexGrow: 1,
@@ -282,7 +285,7 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     paddingHorizontal: 24,
-    paddingTop: 16,
+    paddingTop: 8,
   },
   titleSection: {
     alignItems: 'center',
@@ -360,9 +363,9 @@ const styles = StyleSheet.create({
   },
   input: {
     backgroundColor: '#1a1a1a',
-    borderRadius: 8,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: '#333',
     height: 48,
     paddingHorizontal: 16,
     color: '#fff',
@@ -400,8 +403,8 @@ const styles = StyleSheet.create({
   },
   signupButton: {
     backgroundColor: '#fff',
-    height: 48,
-    borderRadius: 8,
+    height: 52,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
     marginTop: 8,
@@ -437,3 +440,4 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 });
+

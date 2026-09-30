@@ -16,6 +16,11 @@ interface CacheMetrics {
   total: number;
 }
 
+export interface CachePrefixStats {
+  prefix: string;
+  count: number;
+}
+
 export class CacheService {
   private cache = new Map<string, CacheEntry<any>>();
   private hits = 0;
@@ -101,6 +106,33 @@ export class CacheService {
     this.expirations = 0;
   }
 
+  /**
+   * Clear cache entries by key prefix and return removed count
+   */
+  clearByPrefix(prefix: string): number {
+    let removed = 0;
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.cache.delete(key);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Get cache entry count grouped by prefixes
+   */
+  getPrefixStats(prefixes: string[]): CachePrefixStats[] {
+    return prefixes.map((prefix) => {
+      let count = 0;
+      for (const key of this.cache.keys()) {
+        if (key.startsWith(prefix)) count++;
+      }
+      return { prefix, count };
+    });
+  }
+
   // ==========================================
   // DOMAIN-SPECIFIC CACHE METHODS
   // ==========================================
@@ -139,6 +171,22 @@ export class CacheService {
     this.invalidate(`following:${userId}`);
   }
 
+
+  getFollowingListSnapshot(userId: string): string[] | null {
+    const cached = this.cache.get(`following:${userId}`);
+    if (!cached || Date.now() - cached.timestamp >= this.FOLLOWING_LIST_TTL) {
+      return null;
+    }
+    return Array.isArray(cached.data) ? [...cached.data] : null;
+  }
+
+  setFollowingList(userId: string, followingIds: string[]): void {
+    this.set(`following:${userId}`, [...new Set((followingIds || []).filter(Boolean))], this.FOLLOWING_LIST_TTL);
+  }
+
+  invalidateFollowersList(userId: string): void {
+    this.invalidatePattern(`^followers_${userId}_`);
+  }
   /**
    * Cache post
    */
@@ -251,8 +299,9 @@ export class CacheService {
 export const cacheService = new CacheService();
 
 // Log metrics every 5 minutes in development
-if (import.meta.env.DEV) {
+if (__DEV__) {
   setInterval(() => {
     cacheService.logMetrics();
   }, 5 * 60 * 1000);
 }
+

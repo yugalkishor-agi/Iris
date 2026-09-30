@@ -31,7 +31,7 @@ export default function InterestsScreen() {
           <Text style={styles.save}>Save</Text>
         </TouchableOpacity>
       </View>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={styles.content as any}>
         <Text style={styles.description}>
           Select topics you're interested in to see more personalized content
         </Text>

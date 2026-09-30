@@ -1,8 +1,9 @@
 import React from 'react';
-import { View, Text, FlatList, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { TouchableOpacity } from 'react-native';
+import { FlashList } from '@shopify/flash-list';
 
 export default function BadgesScreen() {
   const navigation = useNavigation();
@@ -21,7 +22,7 @@ export default function BadgesScreen() {
         <Text style={styles.title}>Badges</Text>
         <View style={{ width: 28 }} />
       </View>
-      <FlatList
+      <FlashList estimatedItemSize={100}
         data={badges}
         renderItem={({ item }) => (
           <View style={[styles.badge, !item.earned && styles.badgeLocked]}>

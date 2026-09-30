@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { storyService } from '../services/story.service';
+import { storyService, type Story } from '../services/story.service';
 import { realtimeService } from '../services/realtime.service';
-import type { Story, Highlight } from '../types/database';
+import type { Highlight } from '../types/database';
 import { useAuth } from '../contexts/AuthContext';
+import { highlightService } from '../services/highlight.service';
 
 export const useStories = (userId?: string) => {
   const { user } = useAuth();
@@ -29,7 +30,7 @@ export const useStories = (userId?: string) => {
 
     // Listen to real-time story updates
     const listenerId = realtimeService.listenToUserStories(targetUserId, (updatedStories) => {
-      setStories(updatedStories);
+      setStories(updatedStories as unknown as Story[]);
     });
 
     return () => {
@@ -51,8 +52,15 @@ export const useStoriesFeed = () => {
     const loadStoriesFeed = async () => {
       try {
         setLoading(true);
-        const followingIds = await storyService.getStoriesFeed([]);
-        setStoriesMap(followingIds);
+        const stories = await storyService.getFollowingStories(user.userId);
+        const grouped = new Map<string, Story[]>();
+        stories.forEach((story) => {
+          const key = story.authorId;
+          const existing = grouped.get(key) || [];
+          existing.push(story);
+          grouped.set(key, existing);
+        });
+        setStoriesMap(grouped);
       } catch (error) {
         console.error('Failed to load stories feed:', error);
       } finally {
@@ -71,7 +79,7 @@ export const useCreateStory = () => {
   const [creating, setCreating] = useState(false);
 
   const createStory = async (
-    mediaFile: File,
+    mediaFile: any,
     textOverlay?: { text: string; position: { x: number; y: number }; fontSize: number; color: string },
     audience: 'public' | 'followers' | 'closeFriends' = 'followers'
   ) => {
@@ -79,23 +87,22 @@ export const useCreateStory = () => {
 
     setCreating(true);
     try {
-      const { mediaService } = await import('../../src/services/media.service');
+      const { mediaService } = await import('../services/media.service.native');
       const { mediaURL, thumbnailURL } = await mediaService.uploadStoryMedia(
         user.userId,
         mediaFile
       );
 
-      const storyId = await storyService.createStory(
-        user.userId,
-        user.username,
-        user.avatarURL || '',
+      const storyId = await storyService.createStory({
+        authorId: user.userId,
+        authorUsername: user.username,
+        authorAvatarURL: user.avatarURL || '',
         mediaURL,
-        'image',
-        5, // 5 seconds duration for images
         thumbnailURL,
-        textOverlay,
-        audience
-      );
+        mediaType: 'image',
+        caption: textOverlay?.text?.trim() || undefined,
+        audience,
+      });
 
       return storyId;
     } catch (error) {
@@ -118,8 +125,8 @@ export const useHighlights = (userId: string) => {
     const loadHighlights = async () => {
       try {
         setLoading(true);
-        const data = await storyService.getUserHighlights(userId);
-        setHighlights(data);
+        const data = await highlightService.getUserHighlights(userId);
+        setHighlights(data as unknown as Highlight[]);
       } catch (error) {
         console.error('Failed to load highlights:', error);
       } finally {
@@ -130,16 +137,29 @@ export const useHighlights = (userId: string) => {
     loadHighlights();
   }, [userId]);
 
-  const createHighlight = async (name: string, coverFile: File) => {
+  const createHighlight = async (name: string, coverFile: any) => {
     try {
-      const { mediaService } = await import('../../src/services/media.service');
+      const { mediaService } = await import('../services/media.service.native');
       const coverURL = await mediaService.uploadAvatar(userId, coverFile);
-      
-      const highlightId = await storyService.createHighlight(userId, name, coverURL);
-      
-      const updatedHighlights = await storyService.getUserHighlights(userId);
-      setHighlights(updatedHighlights);
-      
+
+      const userStories = await storyService.getUserActiveStories(userId);
+      const highlightId = await highlightService.createHighlight({
+        title: name,
+        authorId: userId,
+        stories: userStories.map((story) => ({
+          storyId: story.storyId,
+          authorId: story.authorId,
+          mediaURL: story.mediaURL,
+          mediaType: story.mediaType,
+          createdAt: story.createdAt,
+          expiresAt: story.expiresAt,
+        })),
+        coverImageURL: coverURL,
+      });
+
+      const updatedHighlights = await highlightService.getUserHighlights(userId);
+      setHighlights(updatedHighlights as unknown as Highlight[]);
+
       return highlightId;
     } catch (error) {
       throw error;
@@ -148,3 +168,4 @@ export const useHighlights = (userId: string) => {
 
   return { highlights, loading, createHighlight };
 };
+

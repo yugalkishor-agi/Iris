@@ -1,73 +1,188 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert } from 'react-native';
+import { InlineLoadingSkeleton, ButtonLoadingSkeleton } from '../components/ui/LoadingSkeleton';
+import React, { useMemo, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { useAuth } from '../contexts/AuthContext';
+import { authService } from '../services/auth.service';
+import { useColors, spacing, typography, borderRadius } from '../styles/theme';
 
 export default function ChangePasswordScreen() {
   const navigation = useNavigation();
-  const { user } = useAuth();
-  const [current, setCurrent] = useState('');
-  const [newPass, setNewPass] = useState('');
-  const [confirm, setConfirm] = useState('');
+  const themeColors = useColors();
+  const styles = useMemo(() => createStyles(themeColors), [themeColors]);
+
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleChange = async () => {
-    if (!current || !newPass || !confirm) {
-      Alert.alert('Error', 'Please fill all fields');
-      return;
+  const validate = () => {
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      Alert.alert('Missing Fields', 'Please fill all fields.');
+      return false;
     }
-    if (newPass !== confirm) {
-      Alert.alert('Error', 'Passwords do not match');
-      return;
+    if (newPassword.length < 6) {
+      Alert.alert('Weak Password', 'New password must be at least 6 characters.');
+      return false;
     }
-    if (newPass.length < 6) {
-      Alert.alert('Error', 'Password must be at least 6 characters');
-      return;
+    if (newPassword !== confirmPassword) {
+      Alert.alert('Mismatch', 'New password and confirm password do not match.');
+      return false;
     }
+    if (newPassword === currentPassword) {
+      Alert.alert('Invalid Password', 'New password must be different from current password.');
+      return false;
+    }
+    return true;
+  };
+
+  const handleChangePassword = async () => {
+    if (!validate()) return;
+
     setLoading(true);
     try {
-      // Call password change service
-      Alert.alert('Success', 'Password changed successfully');
-      navigation.goBack();
-    } catch (error) {
-      Alert.alert('Error', 'Failed to change password');
+      await authService.changePassword(currentPassword, newPassword);
+      Alert.alert('Password Updated', 'Your password has been changed successfully.', [
+        {
+          text: 'OK',
+          onPress: () => navigation.goBack(),
+        },
+      ]);
+    } catch (error: any) {
+      Alert.alert('Update Failed', error?.message || 'Failed to change password. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={28} color="#000" />
+          <Ionicons name="chevron-back" size={24} color={themeColors.text.primary} />
         </TouchableOpacity>
         <Text style={styles.title}>Change Password</Text>
-        <View style={{ width: 28 }} />
+        <View style={styles.placeholder} />
       </View>
+
       <View style={styles.form}>
         <Text style={styles.label}>Current Password</Text>
-        <TextInput style={styles.input} value={current} onChangeText={setCurrent} secureTextEntry />
+        <TextInput
+          value={currentPassword}
+          onChangeText={setCurrentPassword}
+          secureTextEntry
+          autoCapitalize="none"
+          style={styles.input}
+          placeholder="Enter current password"
+          placeholderTextColor={themeColors.text.secondary}
+        />
+
         <Text style={styles.label}>New Password</Text>
-        <TextInput style={styles.input} value={newPass} onChangeText={setNewPass} secureTextEntry />
+        <TextInput
+          value={newPassword}
+          onChangeText={setNewPassword}
+          secureTextEntry
+          autoCapitalize="none"
+          style={styles.input}
+          placeholder="Enter new password"
+          placeholderTextColor={themeColors.text.secondary}
+        />
+
         <Text style={styles.label}>Confirm New Password</Text>
-        <TextInput style={styles.input} value={confirm} onChangeText={setConfirm} secureTextEntry />
-        <TouchableOpacity style={styles.btn} onPress={handleChange} disabled={loading}>
-          <Text style={styles.btnText}>{loading ? 'Changing...' : 'Change Password'}</Text>
+        <TextInput
+          value={confirmPassword}
+          onChangeText={setConfirmPassword}
+          secureTextEntry
+          autoCapitalize="none"
+          style={styles.input}
+          placeholder="Confirm new password"
+          placeholderTextColor={themeColors.text.secondary}
+        />
+
+        <TouchableOpacity
+          style={[styles.primaryButton, loading && styles.primaryButtonDisabled]}
+          onPress={handleChangePassword}
+          disabled={loading}
+        >
+          {loading ? (
+            <InlineLoadingSkeleton />
+          ) : (
+            <Text style={styles.primaryButtonText}>Update Password</Text>
+          )}
         </TouchableOpacity>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
-  title: { fontSize: 18, fontWeight: '600' },
-  form: { padding: 16 },
-  label: { fontSize: 14, fontWeight: '600', color: '#374151', marginBottom: 8, marginTop: 16 },
-  input: { borderWidth: 1, borderColor: '#d1d5db', borderRadius: 8, padding: 12, fontSize: 15 },
-  btn: { backgroundColor: '#3b82f6', padding: 16, borderRadius: 8, alignItems: 'center', marginTop: 24 },
-  btnText: { color: '#fff', fontWeight: '600', fontSize: 16 },
-});
+const createStyles = (themeColors: ReturnType<typeof useColors>) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: themeColors.background.primary,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.md,
+      borderBottomWidth: 1,
+      borderBottomColor: themeColors.border.subtle,
+    },
+    title: {
+      fontSize: typography.fontSize.lg,
+      fontWeight: typography.fontWeight.semibold as any,
+      color: themeColors.text.primary,
+    },
+    placeholder: {
+      width: 24,
+    },
+    form: {
+      padding: spacing.lg,
+    },
+    label: {
+      fontSize: typography.fontSize.sm,
+      color: themeColors.text.secondary,
+      marginBottom: spacing.xs,
+      marginTop: spacing.md,
+      fontWeight: typography.fontWeight.semibold as any,
+    },
+    input: {
+      borderWidth: 1,
+      borderColor: themeColors.border.light,
+      borderRadius: borderRadius.md,
+      backgroundColor: themeColors.background.secondary,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.md,
+      color: themeColors.text.primary,
+      fontSize: typography.fontSize.base,
+    },
+    primaryButton: {
+      marginTop: spacing.xl,
+      backgroundColor: themeColors.accent.primary,
+      paddingVertical: spacing.md,
+      borderRadius: borderRadius.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: 48,
+    },
+    primaryButtonDisabled: {
+      opacity: 0.7,
+    },
+    primaryButtonText: {
+      color: '#fff',
+      fontSize: typography.fontSize.base,
+      fontWeight: typography.fontWeight.semibold as any,
+    },
+  });
+

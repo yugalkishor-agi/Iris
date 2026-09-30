@@ -1,19 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TouchableOpacity,
-  Image,
-  TextInput,
-  ActivityIndicator,
-} from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, TextInput, ActivityIndicator } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { useAuth } from '../../src/contexts/AuthContext';
+import { useAuth } from '../contexts/AuthContext';
 import { userService } from '../../src/services/user.service';
 import type { User } from '../../src/types/database';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 interface UserListTemplateProps {
   title: string;
@@ -64,7 +57,7 @@ export function createUserListScreen(config: UserListTemplateProps) {
     const renderUser = ({ item }: { item: User }) => (
       <TouchableOpacity
         style={styles.userItem}
-        onPress={() => navigation.navigate('Profile' as never, { userId: item.userId } as never)}
+        onPress={() => (navigation as any).navigate('UserProfile', { userId: item.userId })}
       >
         <Image
           source={{ uri: item.avatarURL || 'https://via.placeholder.com/50' }}
@@ -117,11 +110,11 @@ export function createUserListScreen(config: UserListTemplateProps) {
             </Text>
           </View>
         ) : (
-          <FlatList
+          <FlashList estimatedItemSize={100}
             data={filteredUsers}
             renderItem={renderUser}
             keyExtractor={(item) => item.userId}
-            contentContainerStyle={styles.listContainer}
+            contentContainerStyle={styles.listContainer as any}
           />
         )}
       </View>

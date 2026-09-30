@@ -16,6 +16,10 @@ service cloud.firestore {
       return request.auth.uid in participantIds;
     }
 
+    function hasPostCollabRequest(postId, userId) {
+      return exists(/databases/$(database)/documents/posts/$(postId)/collaborationRequests/$(userId));
+    }
+
     // ==========================================
     // USERS COLLECTION
     // ==========================================
@@ -50,11 +54,28 @@ service cloud.firestore {
       }
       
       match /blockedUsers/{blockedUserId} {
-        allow read, write: if isSignedIn() && isOwner(userId);
-      }
+  allow get: if isSignedIn() && (
+    isOwner(userId) ||
+    blockedUserId == request.auth.uid
+  );
+
+  allow list: if isSignedIn() && isOwner(userId);
+
+  allow create, update, delete: if isSignedIn() && isOwner(userId);
+}
       
       match /saved/{postId} {
         allow read, write: if isSignedIn() && isOwner(userId);
+      }
+
+      // Saved collections under user
+      match /savedCollections/{collectionId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+
+        // Saved posts within a collection
+        match /posts/{postId} {
+          allow read, write: if isSignedIn() && isOwner(userId);
+        }
       }
       
       match /messageRequests/{requestId} {
@@ -77,6 +98,16 @@ service cloud.firestore {
       }
 
       match /closeFriends/{friendId} {
+        allow get: if isSignedIn() && (
+          isOwner(userId) ||
+          friendId == request.auth.uid
+        );
+        allow list: if isSignedIn() && isOwner(userId);
+        allow create, update, delete: if isSignedIn() && isOwner(userId);
+      }
+
+      // Fast liked-state hydration index for posts + glimpses
+      match /likedContent/{contentKey} {
         allow read, write: if isSignedIn() && isOwner(userId);
       }
 
@@ -88,6 +119,15 @@ service cloud.firestore {
 
       match /sessions/{sessionId} {
         allow read, write: if isSignedIn() && isOwner(userId);
+      }
+
+      match /pushTokens/{tokenId} {
+        allow read, write: if isSignedIn() && isOwner(userId);
+      }
+
+      match /secureDevices/{deviceId} {
+        allow read: if isSignedIn();
+        allow create, update, delete: if isSignedIn() && isOwner(userId);
       }
 
       match /dataExports/{exportId} {
@@ -113,14 +153,44 @@ service cloud.firestore {
       // Anyone signed in can create posts
       allow create: if isSignedIn() && request.resource.data.authorId == request.auth.uid;
       
-      // Owner can update OR anyone can update stats/engagement
+      // Owner can update OR anyone can update stats/engagement OR invited collaborator can accept/decline themselves
       allow update: if isSignedIn() && (
         resource.data.authorId == request.auth.uid ||
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stats', 'engagement', 'lastEngagementAt', 'updatedAt'])
+        resource.data.userId == request.auth.uid || // legacy posts compatibility
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stats', 'engagement', 'lastEngagementAt', 'updatedAt']) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['collaborators', 'updatedAt']) &&
+          hasPostCollabRequest(postId, request.auth.uid)
+        )
       );
       
       // Only owner can delete
       allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+
+      // Post collaboration requests (doc id = collaborator userId)
+      match /collaborationRequests/{requestId} {
+        allow read: if isSignedIn() && (
+          request.auth.uid == requestId ||
+          request.auth.uid == resource.data.fromUserId ||
+          request.auth.uid == get(/databases/$(database)/documents/posts/$(postId)).data.authorId
+        );
+
+        allow create: if isSignedIn() &&
+          request.auth.uid == request.resource.data.fromUserId &&
+          requestId == request.resource.data.toUserId &&
+          request.resource.data.postId == postId;
+
+        allow update: if isSignedIn() && (
+          request.auth.uid == requestId ||
+          request.auth.uid == resource.data.fromUserId ||
+          request.auth.uid == get(/databases/$(database)/documents/posts/$(postId)).data.authorId
+        );
+
+        allow delete: if isSignedIn() && (
+          request.auth.uid == resource.data.fromUserId ||
+          request.auth.uid == get(/databases/$(database)/documents/posts/$(postId)).data.authorId
+        );
+      }
       
       // Post likes subcollection
       match /likes/{likeId} {
@@ -133,6 +203,7 @@ service cloud.firestore {
       match /saves/{saveId} {
         allow read: if isSignedIn();
         allow create: if isSignedIn() && saveId == request.auth.uid;
+        allow update: if isSignedIn() && saveId == request.auth.uid;
         allow delete: if isSignedIn() && saveId == request.auth.uid;
       }
       
@@ -146,7 +217,11 @@ service cloud.firestore {
           get(/databases/$(database)/documents/posts/$(postId)).data.authorId == request.auth.uid ||
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount', 'likedByCreator', 'updatedAt'])
         );
-        allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+        // Allow delete by comment author OR post owner (moderation)
+        allow delete: if isSignedIn() && (
+          resource.data.authorId == request.auth.uid ||
+          get(/databases/$(database)/documents/posts/$(postId)).data.authorId == request.auth.uid
+        );
         
         // Comment likes
         match /likes/{likeId} {
@@ -158,30 +233,101 @@ service cloud.firestore {
     }
     
     // ==========================================
-    // STORIES COLLECTION (TEMPORARILY OPEN FOR DEBUGGING)
+    // STORIES COLLECTION (SECURE)
     // ==========================================
     match /stories/{storyId} {
-      // TEMPORARY: Allow all operations for debugging
-      allow read, write: if true;
-      
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.authorId == request.auth.uid;
+      allow update: if isSignedIn() && (
+        resource.data.authorId == request.auth.uid ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stats']) &&
+          request.resource.data.stats is map &&
+          resource.data.stats is map &&
+          request.resource.data.stats.diff(resource.data.stats).affectedKeys().hasOnly(['viewsCount', 'likesCount', 'repliesCount'])
+        )
+      );
+      allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+
       match /likes/{likeId} {
-        // TEMPORARY: Allow all operations for debugging
-        allow read, write: if true;
+        allow read: if isSignedIn();
+        allow create, delete: if isSignedIn() && likeId == request.auth.uid;
       }
-      
+
       match /replies/{replyId} {
         allow read: if isSignedIn();
-        allow create: if isSignedIn() && request.resource.data.authorId == request.auth.uid;
-        // Allow reply author OR story owner to delete
-        allow update, delete: if isSignedIn() && (resource.data.authorId == request.auth.uid || get(/databases/$(database)/documents/stories/$(storyId)).data.authorId == request.auth.uid);
+        allow create: if isSignedIn() && (
+          request.resource.data.authorId == request.auth.uid ||
+          request.resource.data.senderId == request.auth.uid
+        );
+        allow delete: if isSignedIn() && (
+          request.auth.uid == resource.data.authorId ||
+          request.auth.uid == resource.data.senderId ||
+          get(/databases/$(database)/documents/stories/$(storyId)).data.authorId == request.auth.uid
+        );
+        allow update: if false;
       }
-      
+
       match /views/{viewId} {
         allow read: if isSignedIn();
-        allow create: if isSignedIn() && viewId == request.auth.uid;
-        allow update: if isSignedIn() && viewId == request.auth.uid;
-        // Allow story owner to delete views when deleting story
-        allow delete: if isSignedIn() && get(/databases/$(database)/documents/stories/$(storyId)).data.authorId == request.auth.uid;
+        allow create, update: if isSignedIn() && viewId == request.auth.uid;
+      }
+
+      match /pollVotes/{voteId} {
+        allow read: if isSignedIn();
+        allow create, update: if isSignedIn()
+          && request.resource.data.voterId == request.auth.uid
+          && voteId == (request.resource.data.stickerId + '_' + request.resource.data.voterId)
+          && request.resource.data.optionIndex is int
+          && request.resource.data.optionIndex >= 0;
+        allow delete: if false;
+      }
+
+      match /sliderValues/{id} {
+        allow read: if isSignedIn();
+        allow create, update: if isSignedIn()
+          && request.resource.data.userId == request.auth.uid
+          && id == (request.resource.data.stickerId + '_' + request.resource.data.userId)
+          && request.resource.data.value is number
+          && request.resource.data.value >= 0 && request.resource.data.value <= 1;
+        allow delete: if false;
+      }
+
+      match /questionReplies/{replyId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() && request.resource.data.senderId == request.auth.uid;
+        allow delete: if isSignedIn() && (
+          request.auth.uid == resource.data.senderId ||
+          get(/databases/$(database)/documents/stories/$(storyId)).data.authorId == request.auth.uid
+        );
+        allow update: if false;
+      }
+
+      match /quizAnswers/{id} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn()
+          && request.resource.data.userId == request.auth.uid
+          && id == (request.resource.data.stickerId + '_' + request.resource.data.userId)
+          && request.resource.data.optionIndex is int
+          && request.resource.data.optionIndex >= 0;
+        allow update, delete: if false;
+      }
+
+      // Widgets subcollection (for interactive stickers)
+      match /widgets/{widgetId} {
+        allow read: if isSignedIn();
+        // Only story owner can create/update widgets
+        allow create, update: if isSignedIn() && 
+          get(/databases/$(database)/documents/stories/$(storyId)).data.authorId == request.auth.uid;
+        allow delete: if isSignedIn() && 
+          get(/databases/$(database)/documents/stories/$(storyId)).data.authorId == request.auth.uid;
+        
+        // Widget responses subcollection
+        match /responses/{responseId} {
+          allow read: if isSignedIn();
+          allow create, update: if isSignedIn() && responseId == request.auth.uid;
+          allow delete: if false;
+        }
       }
     }
     
@@ -249,7 +395,11 @@ service cloud.firestore {
           get(/databases/$(database)/documents/glimpses/$(glimpseId)).data.authorId == request.auth.uid ||
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount', 'likedByCreator', 'updatedAt'])
         );
-        allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+        // Allow delete by comment author OR glimpse owner (moderation)
+        allow delete: if isSignedIn() && (
+          resource.data.authorId == request.auth.uid ||
+          get(/databases/$(database)/documents/glimpses/$(glimpseId)).data.authorId == request.auth.uid
+        );
         
         // Comment likes for glimpses
         match /likes/{likeId} {
@@ -338,10 +488,175 @@ service cloud.firestore {
     }
     
     // ==========================================
+    // DIRECT MESSAGES (DM) SYSTEM
+    // ==========================================
+    match /directMessages/{conversationId} {
+      allow read, write: if isSignedIn() && 
+        request.auth.uid in resource.data.participants;
+    }
+    
+    match /dmMessages/{messageId} {
+      allow read: if isSignedIn() && 
+        (request.auth.uid == resource.data.senderId ||
+         request.auth.uid == resource.data.recipientId);
+      
+      allow create: if isSignedIn() && 
+        request.auth.uid == request.resource.data.senderId;
+      
+      allow update: if isSignedIn() && 
+        (request.auth.uid == resource.data.senderId ||
+         request.auth.uid == resource.data.recipientId);
+    }
+    
+    match /messageRequests/{requestId} {
+      allow read: if isSignedIn() && 
+        (request.auth.uid == resource.data.requesterId ||
+         request.auth.uid == resource.data.recipientId);
+      
+      allow create: if isSignedIn() && 
+        request.auth.uid == request.resource.data.requesterId;
+      
+      allow update: if isSignedIn() && 
+        request.auth.uid == resource.data.recipientId;
+    }
+    
+    // ==========================================
+    // GROUP CHATS SYSTEM
+    // ==========================================
+    match /groupChats/{chatId} {
+      allow read, write: if isSignedIn() && 
+        request.auth.uid in resource.data.participants;
+    }
+    
+    match /groupMessages/{messageId} {
+      allow read: if isSignedIn() && 
+        isGroupParticipant(request.auth.uid, resource.data.chatId);
+      
+      allow create: if isSignedIn() && 
+        request.auth.uid == request.resource.data.senderId &&
+        isGroupParticipant(request.auth.uid, request.resource.data.chatId);
+    }
+    
+    // ==========================================
+    // REELS SYSTEM
+    // ==========================================
+    match /reels/{reelId} {
+      allow read: if isSignedIn() && 
+        (resource.data.visibility == 'public' ||
+         resource.data.authorId == request.auth.uid ||
+         (resource.data.visibility == 'followers' && 
+          isFollowing(request.auth.uid, resource.data.authorId)));
+      
+      allow create: if isSignedIn() && 
+        request.auth.uid == request.resource.data.authorId;
+      
+      allow update: if isSignedIn() && 
+        request.auth.uid == resource.data.authorId;
+    }
+    
+    match /reelViews/{viewId} {
+      allow create: if isSignedIn() && 
+        request.auth.uid == request.resource.data.userId;
+      
+      allow read: if isSignedIn() && 
+        request.auth.uid == resource.data.userId;
+    }
+    
+    match /reelComments/{commentId} {
+      allow read: if isSignedIn() && 
+        canViewReel(request.auth.uid, resource.data.reelId);
+      
+      allow create: if isSignedIn() && 
+        request.auth.uid == request.resource.data.authorId &&
+        canViewReel(request.auth.uid, request.resource.data.reelId);
+    }
+    
+    // ==========================================
+    // UNIVERSAL COMMENTS SYSTEM
+    // ==========================================
+    match /comments/{commentId} {
+      allow read: if isSignedIn() && 
+        canReadTarget(request.auth.uid, resource.data.targetType, resource.data.targetId);
+      
+      allow create: if isSignedIn() && 
+        request.auth.uid == request.resource.data.authorId &&
+        canReadTarget(request.auth.uid, request.resource.data.targetType, request.resource.data.targetId);
+      
+      allow update: if isSignedIn() && 
+        request.auth.uid == resource.data.authorId;
+      
+      allow delete: if isSignedIn() && 
+        request.auth.uid == resource.data.authorId;
+    }
+    
+    // ==========================================
+    // UNIVERSAL LIKES SYSTEM
+    // ==========================================
+    match /likes/{likeId} {
+      allow read: if isSignedIn();
+      
+      allow create: if isSignedIn() && 
+        request.auth.uid == request.resource.data.userId;
+      
+      allow delete: if isSignedIn() && 
+        request.auth.uid == resource.data.userId;
+    }
+    
+    // ==========================================
+    // PHONE VERIFICATIONS (AUTH)
+    // ==========================================
+    match /phoneVerifications/{requestId} {
+      allow read, write: if isSignedIn();
+    }
+    
+    // ==========================================
     // APP SETTINGS
     // ==========================================
     match /settings/{userId} {
       allow read, write: if isSignedIn() && isOwner(userId);
     }
+    
+    // ==========================================
+    // HELPER FUNCTIONS FOR NEW COLLECTIONS
+    // ==========================================
+    function isGroupParticipant(userId, chatId) {
+      return userId in get(/databases/$(database)/documents/groupChats/$(chatId)).data.participants;
+    }
+    
+    function canViewReel(userId, reelId) {
+      let reel = get(/databases/$(database)/documents/reels/$(reelId));
+      return reel.data.visibility == 'public' ||
+             reel.data.authorId == userId ||
+             (reel.data.visibility == 'followers' && 
+              isFollowing(userId, reel.data.authorId));
+    }
+    
+    function canReadTarget(userId, targetType, targetId) {
+      return (
+        (targetType == 'post' && canReadPost(userId, targetId)) ||
+        (targetType == 'reel' && canViewReel(userId, targetId)) ||
+        (targetType == 'glimpse' && isSignedIn())
+      );
+    }
+    
+    function canReadPost(userId, postId) {
+      let post = get(/databases/$(database)/documents/posts/$(postId));
+      return post.data.isPublic == true ||
+             post.data.authorId == userId ||
+             isSignedIn();
+    }
+    
+    function isFollowing(followerId, followingId) {
+      return exists(/databases/$(database)/documents/users/$(followingId)/followers/$(followerId));
+    }
   }
 }
+
+
+
+
+
+
+
+
+

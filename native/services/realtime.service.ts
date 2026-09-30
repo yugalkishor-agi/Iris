@@ -12,8 +12,9 @@ import { db } from '../config/firebase';
 import type { Message, Notification, Story } from '../types/database';
 
 /**
- * Real-time listener service for live updates
- * Handles messages, notifications, and stories
+ * Enhanced Real-time listener service for live updates
+ * Handles messages, notifications, stories, posts, and auto-refresh
+ * Provides silent background updates without user intervention
  */
 
 export class RealtimeService {

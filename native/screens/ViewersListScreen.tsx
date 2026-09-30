@@ -1,14 +1,35 @@
-import React from 'react';
-import { View, Text, FlatList, TouchableOpacity, Image, StyleSheet } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { storyService } from '../services/story.service';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 export default function ViewersListScreen() {
   const navigation = useNavigation();
-  const viewers = [
-    { id: '1', name: 'John', avatar: 'https://via.placeholder.com/50', time: '2h ago' },
-    { id: '2', name: 'Jane', avatar: 'https://via.placeholder.com/50', time: '5h ago' },
-  ];
+  const route = useRoute();
+  const { storyId } = route.params as any;
+  const [viewers, setViewers] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadViewers();
+  }, [storyId]);
+
+  const loadViewers = async () => {
+    try {
+      setLoading(true);
+      const storyViewers = await storyService.getStoryViews(storyId);
+      console.log('👀 Loaded viewers:', storyViewers.length);
+      setViewers(storyViewers || []);
+    } catch (error) {
+      console.error('Failed to load viewers:', error);
+      setViewers([]);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <View style={styles.container}>
@@ -19,7 +40,7 @@ export default function ViewersListScreen() {
         <Text style={styles.title}>Viewers</Text>
         <View style={{ width: 28 }} />
       </View>
-      <FlatList
+      <FlashList estimatedItemSize={100}
         data={viewers}
         renderItem={({ item }) => (
           <View style={styles.viewer}>

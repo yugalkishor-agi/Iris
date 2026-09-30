@@ -5,7 +5,7 @@
     "jsx": "react-native",
     "module": "esnext",
     "target": "esnext",
-    "lib": ["esnext"],
+    "lib": ["esnext", "dom"],
     "moduleResolution": "node",
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
@@ -18,9 +18,10 @@
       "@/*": ["./native/*"]
     }
   },
-  "include": [
-    "native/**/*",
-    "index.js"
+  "files": [
+    "index.js",
+    "native/App.tsx",
+    "native/types/module-shims.d.ts"
   ],
   "exclude": [
     "node_modules",

@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 // ==================== TYPES ====================
 export interface VideoClip {
@@ -99,7 +98,7 @@ export interface EditorAction {
 // ==================== STORE ====================
 interface GlimpseEditorState {
   // Core Engine
-  ffmpeg: FFmpeg | null;
+  ffmpeg: any;
   ffmpegLoaded: boolean;
   initFFmpeg: () => Promise<void>;
 
@@ -283,23 +282,12 @@ const initialState = {
 export const useGlimpseEditorStore = create<GlimpseEditorState>((set, get) => ({
   ...initialState,
 
-  // FFmpeg initialization
+  // FFmpeg initialization (stubbed for native)
   initFFmpeg: async () => {
-    const { ffmpeg } = get();
-    if (ffmpeg && get().ffmpegLoaded) return;
-
-    const newFFmpeg = new FFmpeg();
-    
-    try {
-      await newFFmpeg.load({
-        coreURL: 'https://unpkg.com/@ffmpeg/core@0.12.15/dist/umd/ffmpeg-core.js',
-      });
-      
-      set({ ffmpeg: newFFmpeg, ffmpegLoaded: true });
-    } catch (error) {
-      console.error('Failed to load FFmpeg:', error);
-      throw error;
-    }
+    const { ffmpegLoaded } = get();
+    if (ffmpegLoaded) return;
+    // No-op on native; web implementation should be separate
+    set({ ffmpeg: null, ffmpegLoaded: false });
   },
 
   setProjectName: (name) => set({ projectName: name }),

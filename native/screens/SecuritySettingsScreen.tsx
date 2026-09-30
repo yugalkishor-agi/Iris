@@ -18,12 +18,16 @@ const SecuritySettingsScreenComponent = createSettingsScreen({
           type: 'navigation',
           icon: 'time',
           navigateTo: 'LoginActivity',
+          badge: 'Coming soon',
+          disabled: true,
         },
         {
           label: 'Saved Login Info',
           type: 'navigation',
           icon: 'save',
-          navigateTo: 'SavedLoginInfo',
+          navigateTo: 'SavedLogin',
+          badge: 'Coming soon',
+          disabled: true,
         },
       ],
     },
@@ -35,14 +39,16 @@ const SecuritySettingsScreenComponent = createSettingsScreen({
           type: 'toggle',
           icon: 'scan',
           value: false,
-          onToggle: (value) => console.log('FaceID:', value),
+          settingKey: 'requireFaceId',
+          settingScope: 'settings',
         },
         {
           label: 'App Lock',
           type: 'toggle',
           icon: 'lock-closed',
           value: false,
-          onToggle: (value) => console.log('AppLock:', value),
+          settingKey: 'appLockEnabled',
+          settingScope: 'settings',
         },
       ],
     },
@@ -54,12 +60,16 @@ const SecuritySettingsScreenComponent = createSettingsScreen({
           type: 'navigation',
           icon: 'globe',
           navigateTo: 'AppsWebsites',
+          badge: 'Coming soon',
+          disabled: true,
         },
         {
           label: 'Account Activity',
           type: 'navigation',
           icon: 'analytics',
           navigateTo: 'AccountActivity',
+          badge: 'Coming soon',
+          disabled: true,
         },
       ],
     },
@@ -67,3 +77,6 @@ const SecuritySettingsScreenComponent = createSettingsScreen({
 });
 
 export default SecuritySettingsScreenComponent;
+
+
+

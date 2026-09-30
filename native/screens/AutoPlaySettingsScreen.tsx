@@ -7,16 +7,16 @@ export default createSettingsScreen({
     {
       title: 'Videos',
       items: [
-        { label: 'Auto-Play Videos', type: 'toggle', icon: 'play-circle', value: true, onToggle: (v) => console.log('Videos:', v) },
-        { label: 'Auto-Play on WiFi Only', type: 'toggle', icon: 'wifi', value: false, onToggle: (v) => console.log('WiFi:', v) },
-        { label: 'Mute Videos by Default', type: 'toggle', icon: 'volume-mute', value: true, onToggle: (v) => console.log('Mute:', v) },
+        { label: 'Auto-Play Videos', type: 'toggle', icon: 'play-circle', value: true, settingKey: 'autoPlayVideos', settingScope: 'settings' },
+        { label: 'Auto-Play on WiFi Only', type: 'toggle', icon: 'wifi', value: false, settingKey: 'autoplayWifiOnly', settingScope: 'settings' },
+        { label: 'Mute Videos by Default', type: 'toggle', icon: 'volume-mute', value: true, settingKey: 'muteAutoplayVideos', settingScope: 'settings' },
       ],
     },
     {
       title: 'Stories',
       items: [
-        { label: 'Auto-Play Stories', type: 'toggle', icon: 'play-forward', value: true, onToggle: (v) => console.log('Stories:', v) },
-        { label: 'Auto-Advance to Next Story', type: 'toggle', icon: 'chevron-forward', value: true, onToggle: (v) => console.log('Advance:', v) },
+        { label: 'Auto-Play Stories', type: 'toggle', icon: 'play-forward', value: true, settingKey: 'autoPlayStories', settingScope: 'settings' },
+        { label: 'Auto-Advance to Next Story', type: 'toggle', icon: 'chevron-forward', value: true, settingKey: 'autoAdvanceStories', settingScope: 'settings' },
       ],
     },
   ],

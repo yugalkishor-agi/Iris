@@ -35,7 +35,7 @@ export default function PollCreateScreen() {
           <Text style={styles.post}>Post</Text>
         </TouchableOpacity>
       </View>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={styles.content as any}>
         <Text style={styles.label}>Question</Text>
         <TextInput
           style={styles.input}

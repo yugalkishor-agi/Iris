@@ -1,18 +1,7 @@
+import { InlineLoadingSkeleton, ButtonLoadingSkeleton } from '../components/ui/LoadingSkeleton';
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TextInput,
-  TouchableOpacity,
-  Image,
-  KeyboardAvoidingView,
-  Platform,
-  ActivityIndicator,
-  Keyboard,
-  Alert,
-} from 'react-native';
+  View, Text, StyleSheet, TextInput, TouchableOpacity, KeyboardAvoidingView, Platform, ActivityIndicator, Keyboard, Alert } from 'react-native';
 import { useRoute, useNavigation, RouteProp } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { onSnapshot, doc } from 'firebase/firestore';
@@ -23,6 +12,8 @@ import { userService } from '../services/user.service';
 import { settingsService } from '../services/settings.service';
 import { messageService } from '../services/message.service';
 import type { User } from '../types/database';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 
 type ChatScreenRouteProp = RouteProp<{ Chat: { userId: string } }, 'Chat'>;
 
@@ -33,7 +24,10 @@ export default function ChatScreen() {
   const otherUserId = route.params?.userId;
 
   const [conversationId, setConversationId] = useState('');
-  const { messages: chatMessages, loading, sendMessage: sendMsg, markAsRead } = useMessages(conversationId);
+  const { messages: chatMessages, loading, sendMessage: sendMsg, markAsRead } = useMessages(conversationId, {
+    initialLimit: 6,
+    pageSize: 12,
+  });
   
   const [messageText, setMessageText] = useState('');
   const [sending, setSending] = useState(false);
@@ -45,7 +39,7 @@ export default function ChatScreen() {
   const [isTyping, setIsTyping] = useState(false);
   const [otherUserTyping, setOtherUserTyping] = useState(false);
   
-  const flatListRef = useRef<FlatList>(null);
+  const flatListRef = useRef<FlashList<any>>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Initialize chat and fetch user data
@@ -178,37 +172,33 @@ export default function ChatScreen() {
 
   // Send message handler
   const handleSendMessage = async () => {
-    if (!messageText.trim() || !user || !conversationId || sending) return;
+    if (!messageText.trim() || !user || !conversationId) return;
     
     const text = messageText.trim();
+    const replyPayload = replyingTo ? {
+      messageId: replyingTo.messageId,
+      text: replyingTo.text,
+      senderId: replyingTo.senderId,
+      senderUsername: replyingTo.senderUsername
+    } : undefined;
     setMessageText('');
-    setSending(true);
     Keyboard.dismiss();
     
+    // Clear reply + typing immediately so text send feels instant.
+    setReplyingTo(null);
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+    userService.setTypingStatus(conversationId, user.userId, false);
+    
     try {
-      await sendMsg(
-        text,
-        undefined,
-        replyingTo ? {
-          messageId: replyingTo.messageId,
-          text: replyingTo.text,
-          senderId: replyingTo.senderId,
-          senderUsername: replyingTo.senderUsername
-        } : undefined
-      );
-      
-      setReplyingTo(null);
-      
-      // Clear typing indicator
-      if (typingTimeoutRef.current) {
-        clearTimeout(typingTimeoutRef.current);
-      }
-      userService.setTypingStatus(conversationId, user.userId, false);
+      await sendMsg(text, undefined, replyPayload);
     } catch (error) {
       console.error('Failed to send message:', error);
-      Alert.alert('Error', 'Failed to send message');
-    } finally {
-      setSending(false);
+      setMessageText(text);
+      if (replyPayload) {
+        setReplyingTo(replyPayload);
+      }
     }
   };
 
@@ -228,7 +218,7 @@ export default function ChatScreen() {
       <View style={[styles.messageRow, isMe && styles.messageRowMe]}>
         {showAvatar && (
           <Image
-            source={{ uri: otherUser?.avatarURL || 'https://via.placeholder.com/40' }}
+                  source={{ uri: otherUser?.avatarURL || '' }}
             style={styles.messageAvatar}
           />
         )}
@@ -282,10 +272,10 @@ export default function ChatScreen() {
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.headerUser}
-          onPress={() => navigation.navigate('Profile' as never, { userId: otherUserId } as never)}
+          onPress={() => (navigation as any).navigate('Profile', { userId: otherUserId })}
         >
           <Image
-            source={{ uri: otherUser?.avatarURL || 'https://via.placeholder.com/40' }}
+                source={{ uri: otherUser?.avatarURL || '' }}
             style={styles.headerAvatar}
           />
           <View style={styles.headerInfo}>
@@ -326,12 +316,12 @@ export default function ChatScreen() {
           <ActivityIndicator size="large" color="#3b82f6" />
         </View>
       ) : (
-        <FlatList
+        <FlashList estimatedItemSize={100}
           ref={flatListRef}
           data={chatMessages}
           renderItem={renderMessage}
           keyExtractor={(item) => item.messageId}
-          contentContainerStyle={styles.messagesList}
+          contentContainerStyle={styles.messagesList as any}
           onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
         />
       )}
@@ -380,7 +370,7 @@ export default function ChatScreen() {
           disabled={!messageText.trim() || sending}
         >
           {sending ? (
-            <ActivityIndicator size="small" color="#fff" />
+            <InlineLoadingSkeleton />
           ) : (
             <Ionicons name="send" size={20} color="#fff" />
           )}
@@ -589,3 +579,4 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
 });
+

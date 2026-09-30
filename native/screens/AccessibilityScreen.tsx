@@ -8,24 +8,24 @@ export default createSettingsScreen({
       title: 'Visual',
       items: [
         { label: 'Increase Text Size', type: 'navigation', icon: 'text', navigateTo: 'FontSize' },
-        { label: 'High Contrast', type: 'toggle', icon: 'contrast', value: false, onToggle: (v) => console.log('Contrast:', v) },
-        { label: 'Reduce Motion', type: 'toggle', icon: 'swap-horizontal', value: false, onToggle: (v) => console.log('Motion:', v) },
-        { label: 'Reduce Transparency', type: 'toggle', icon: 'layers', value: false, onToggle: (v) => console.log('Trans:', v) },
+        { label: 'High Contrast', type: 'toggle', icon: 'contrast', value: false, settingKey: 'highContrastMode', settingScope: 'settings' },
+        { label: 'Reduce Motion', type: 'toggle', icon: 'swap-horizontal', value: false, settingKey: 'reduceMotion', settingScope: 'settings' },
+        { label: 'Reduce Transparency', type: 'toggle', icon: 'layers', value: false, settingKey: 'reduceTransparency', settingScope: 'settings' },
       ],
     },
     {
       title: 'Audio',
       items: [
-        { label: 'Auto-play Videos', type: 'toggle', icon: 'play-circle', value: true, onToggle: (v) => console.log('Autoplay:', v) },
-        { label: 'Captions', type: 'toggle', icon: 'text', value: false, onToggle: (v) => console.log('Captions:', v) },
-        { label: 'Sound Effects', type: 'toggle', icon: 'volume-high', value: true, onToggle: (v) => console.log('Sound:', v) },
+        { label: 'Auto-play Videos', type: 'toggle', icon: 'play-circle', value: true, settingKey: 'accessibilityAutoplayVideos', settingScope: 'settings' },
+        { label: 'Captions', type: 'navigation', icon: 'text', navigateTo: 'CaptionsSettings' },
+        { label: 'Sound Effects', type: 'navigation', icon: 'volume-high', navigateTo: 'SoundSettings' },
       ],
     },
     {
       title: 'Interaction',
       items: [
-        { label: 'Tap to Show Full Caption', type: 'toggle', icon: 'hand-left', value: true, onToggle: (v) => console.log('Tap:', v) },
-        { label: 'Haptic Feedback', type: 'toggle', icon: 'phone-portrait', value: true, onToggle: (v) => console.log('Haptic:', v) },
+        { label: 'Tap to Show Full Caption', type: 'toggle', icon: 'hand-left', value: true, settingKey: 'tapToExpandCaption', settingScope: 'settings' },
+        { label: 'Haptic Feedback', type: 'toggle', icon: 'phone-portrait', value: true, settingKey: 'hapticFeedback', settingScope: 'settings' },
       ],
     },
   ],

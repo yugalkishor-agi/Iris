@@ -2,6 +2,32 @@ import React from 'react';
 import { Text, View, StyleSheet } from 'react-native';
 import { createStaticContentScreen } from '../templates/StaticContentTemplate';
 
+const styles = StyleSheet.create({
+  heading: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#000',
+    marginBottom: 8,
+  },
+  date: {
+    fontSize: 14,
+    color: '#6b7280',
+    marginBottom: 24,
+  },
+  section: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#000',
+    marginTop: 24,
+    marginBottom: 12,
+  },
+  paragraph: {
+    fontSize: 15,
+    lineHeight: 24,
+    color: '#374151',
+  },
+});
+
 const PrivacyPolicyScreenComponent = createStaticContentScreen({
   title: 'Privacy Policy',
   content: (
@@ -65,32 +91,6 @@ const PrivacyPolicyScreenComponent = createStaticContentScreen({
       </Text>
     </View>
   ),
-});
-
-const styles = StyleSheet.create({
-  heading: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: '#000',
-    marginBottom: 8,
-  },
-  date: {
-    fontSize: 14,
-    color: '#6b7280',
-    marginBottom: 24,
-  },
-  section: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#000',
-    marginTop: 24,
-    marginBottom: 12,
-  },
-  paragraph: {
-    fontSize: 15,
-    lineHeight: 24,
-    color: '#374151',
-  },
 });
 
 export default PrivacyPolicyScreenComponent;

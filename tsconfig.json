@@ -38,6 +38,7 @@
     "client/**/*",
     "server/**/*",
     "shared/**/*",
+    "native/**/*",
     "vite.config.ts",
     "vite.config.server.ts"
   ],

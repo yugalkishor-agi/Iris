@@ -3,7 +3,7 @@
  * Only logs in development, sends errors to monitoring in production
  */
 
-const isDevelopment = import.meta.env.DEV;
+const isDevelopment = __DEV__;
 
 export const logger = {
   /**

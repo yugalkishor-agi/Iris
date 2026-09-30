@@ -1,6 +1,43 @@
 import { supabase, getMediaUrl, STORAGE_BUCKETS } from '../config/supabase';
+import { Platform } from 'react-native';
+import * as FileSystem from 'expo-file-system';
 
 export class MediaService {
+  // Convert base64 string to Uint8Array (RN-safe)
+  private base64ToUint8Array(base64: string): Uint8Array {
+    const binaryString = global.atob ? global.atob(base64) : this.atobPolyfill(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+    return bytes;
+  }
+
+  // Small atob polyfill using Buffer if available
+  private atobPolyfill(b64: string): string {
+    try {
+      // @ts-ignore
+      const BufferAny = (global as any).Buffer || undefined;
+      if (BufferAny) {
+        return BufferAny.from(b64, 'base64').toString('binary');
+      }
+    } catch {}
+    // Fallback: manual decode (limited)
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+    let output = '';
+    let buffer = 0;
+    let bits = 0;
+    for (let i = 0; i < b64.length; i++) {
+      const val = chars.indexOf(b64[i]);
+      if (val < 0) continue;
+      buffer = (buffer << 6) | val;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        output += String.fromCharCode((buffer >>> bits) & 0xff);
+      }
+    }
+    return output;
+  }
   // ==========================================
   // IMAGE COMPRESSION & OPTIMIZATION
   // ==========================================
@@ -9,10 +46,14 @@ export class MediaService {
    * Compress image before upload
    */
   private async compressImage(
-    file: File,
+    file: Blob,
     maxWidth = 1080,
     quality = 0.8
   ): Promise<Blob> {
+    // On native, skip DOM-based compression and return original blob
+    if (Platform.OS !== 'web') {
+      return Promise.resolve(file);
+    }
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.readAsDataURL(file);
@@ -31,6 +72,7 @@ export class MediaService {
             height = (height * maxWidth) / width;
             width = maxWidth;
           }
+
           
           canvas.width = width;
           canvas.height = height;
@@ -62,10 +104,14 @@ export class MediaService {
    * Generate thumbnail from image
    */
   private async generateThumbnail(
-    file: File,
+    file: Blob,
     width = 300,
     height = 300
   ): Promise<Blob> {
+    // On native, skip DOM canvas thumbnail and return original blob
+    if (Platform.OS !== 'web') {
+      return Promise.resolve(file);
+    }
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.readAsDataURL(file);
@@ -156,6 +202,25 @@ export class MediaService {
     } catch (error) {
       console.error('Avatar upload failed:', error);
       throw new Error('Failed to upload avatar');
+    }
+  }
+
+  async uploadBanner(userId: string, file: Blob): Promise<string> {
+    try {
+      const compressed = await this.compressImage(file, 1920, 0.85);
+      const fileName = `banners/${userId}/${Date.now()}.jpg`;
+      const { data, error } = await supabase.storage
+        .from(STORAGE_BUCKETS.AVATARS)
+        .upload(fileName, compressed, {
+          cacheControl: '3600',
+          upsert: true,
+          contentType: 'image/jpeg',
+        });
+      if (error) throw error;
+      return getMediaUrl(`${STORAGE_BUCKETS.AVATARS}/${fileName}`, false);
+    } catch (error) {
+      console.error('Banner upload failed:', error);
+      throw new Error('Failed to upload banner');
     }
   }
 
@@ -259,7 +324,7 @@ export class MediaService {
   /**
    * Upload story media - Fast and simple
    */
-  async uploadStoryMedia(userId: string, file: File): Promise<{ mediaURL: string; thumbnailURL: string }> {
+  async uploadStoryMedia(userId: string, file: Blob): Promise<{ mediaURL: string; thumbnailURL: string }> {
     const startTime = Date.now();
     console.log('⏱️ Upload started:', new Date().toLocaleTimeString());
     console.log('📦 Original size:', file.size, 'bytes');
@@ -267,11 +332,14 @@ export class MediaService {
     const timestamp = Date.now();
     const fileName = `${userId}/${timestamp}.jpg`;
     
-    // Extreme compression (360p, 0.75 quality) for tiny files
-    console.log('🗜️ Starting compression to 360p...');
-    const compressStart = Date.now();
-    const compressed = await this.compressImage(file, 360, 0.75);
-    console.log(`✅ Compressed in ${Date.now() - compressStart}ms to ${compressed.size} bytes`);
+    // On web, compress aggressively; on native, use original blob
+    let uploadBlob: Blob = file;
+    if (Platform.OS === 'web') {
+      console.log('🗜️ Starting compression to 360p...');
+      const compressStart = Date.now();
+      uploadBlob = await this.compressImage(file, 360, 0.75);
+      console.log(`✅ Compressed in ${Date.now() - compressStart}ms to ${uploadBlob.size} bytes`);
+    }
     
     // Direct simple upload
     console.log('📤 Uploading to Supabase stories bucket...');
@@ -279,7 +347,7 @@ export class MediaService {
     
     const { data, error } = await supabase.storage
       .from(STORAGE_BUCKETS.STORIES)
-      .upload(fileName, compressed, {
+      .upload(fileName, uploadBlob, {
         contentType: 'image/jpeg',
         cacheControl: '3600',
         upsert: false,
@@ -296,6 +364,149 @@ export class MediaService {
     const mediaURL = getMediaUrl(`${STORAGE_BUCKETS.STORIES}/${fileName}`, false);
     
     return { mediaURL, thumbnailURL: mediaURL };
+  }
+
+  /**
+   * Upload story video
+   */
+  async uploadStoryVideo(userId: string, file: Blob): Promise<{ mediaURL: string; thumbnailURL: string }> {
+    try {
+      const timestamp = Date.now();
+      const fileName = `${userId}/${timestamp}.mp4`;
+
+      const { data, error } = await supabase.storage
+        .from(STORAGE_BUCKETS.STORIES)
+        .upload(fileName, file, {
+          contentType: 'video/mp4',
+          cacheControl: '3600',
+          upsert: false,
+        });
+
+      if (error) throw error;
+
+      const mediaURL = getMediaUrl(`${STORAGE_BUCKETS.STORIES}/${fileName}`, false);
+      const thumbnailURL = mediaURL;
+      return { mediaURL, thumbnailURL };
+    } catch (error) {
+      console.error('Story video upload failed:', error);
+      throw new Error('Failed to upload story video');
+    }
+  }
+
+  /**
+   * Upload story image from a local file path (Native). Avoids creating a large Blob in JS memory.
+   */
+  async uploadStoryImagePath(userId: string, fileUri: string): Promise<{ mediaURL: string; thumbnailURL: string }> {
+    try {
+      const timestamp = Date.now();
+      const fileName = `${userId}/${timestamp}.jpg`;
+      const filesApi: any = supabase.storage.from(STORAGE_BUCKETS.STORIES);
+      const canSign = typeof filesApi?.createSignedUploadUrl === 'function';
+      if (canSign) {
+        console.log('[MediaService] Using signed URL flow for image');
+        const { data, error } = await filesApi.createSignedUploadUrl(fileName);
+        if (error || !data?.signedUrl) throw error || new Error('Failed to create signed upload URL');
+        const baseFromPublic = getMediaUrl('', false);
+        const supaBase = baseFromPublic.split('/storage')[0];
+        const signedUrl = (data.signedUrl.startsWith('http') ? data.signedUrl : `${supaBase}${data.signedUrl}`);
+        const result = await FileSystem.uploadAsync(signedUrl, fileUri, {
+          httpMethod: 'PUT',
+          uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+          headers: {
+            'x-upsert': 'false',
+            'Cache-Control': '3600',
+            'Content-Type': 'image/jpeg',
+          },
+        });
+        if (result.status !== 200 && result.status !== 201) {
+          console.error('[MediaService] Signed image upload failed', { status: result.status, body: String(result.body || '').slice(0, 300) });
+          throw new Error(`Signed image upload failed with status ${result.status}`);
+        }
+      } else {
+        console.log('[MediaService] Using direct storage.upload flow for image (fallback)');
+        const base64 = await FileSystem.readAsStringAsync(fileUri, { encoding: FileSystem.EncodingType.Base64 });
+        const bytes = this.base64ToUint8Array(base64);
+        const { error: upErr } = await supabase.storage
+          .from(STORAGE_BUCKETS.STORIES)
+          .upload(fileName, bytes as any, { contentType: 'image/jpeg', cacheControl: '3600', upsert: false });
+        if (upErr) throw upErr;
+      }
+
+      const mediaURL = getMediaUrl(`${STORAGE_BUCKETS.STORIES}/${fileName}`, false);
+      return { mediaURL, thumbnailURL: mediaURL };
+    } catch (error) {
+      console.error('Story image path upload failed:', error);
+      throw new Error('Failed to upload story image');
+    }
+  }
+
+  /**
+   * Upload story video from a local file path (Native). Avoids creating a large Blob in JS memory.
+   */
+  async uploadStoryVideoPath(userId: string, fileUri: string): Promise<{ mediaURL: string; thumbnailURL: string }> {
+    try {
+      const timestamp = Date.now();
+      const fileName = `${userId}/${timestamp}.mp4`;
+      const filesApi: any = supabase.storage.from(STORAGE_BUCKETS.STORIES);
+      const canSign = typeof filesApi?.createSignedUploadUrl === 'function';
+      if (canSign) {
+        console.log('[MediaService] Using signed URL flow for video');
+        const { data, error } = await filesApi.createSignedUploadUrl(fileName);
+        if (error || !data?.signedUrl) throw error || new Error('Failed to create signed upload URL');
+        const baseFromPublic = getMediaUrl('', false);
+        const supaBase = baseFromPublic.split('/storage')[0];
+        const signedUrl = (data.signedUrl.startsWith('http') ? data.signedUrl : `${supaBase}${data.signedUrl}`);
+        const result = await FileSystem.uploadAsync(signedUrl, fileUri, {
+          httpMethod: 'PUT',
+          uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+          headers: {
+            'x-upsert': 'false',
+            'Cache-Control': '3600',
+            'Content-Type': 'video/mp4',
+          },
+        });
+        if (result.status !== 200 && result.status !== 201) {
+          console.error('[MediaService] Signed video upload failed', { status: result.status, body: String(result.body || '').slice(0, 300) });
+          throw new Error(`Signed video upload failed with status ${result.status}`);
+        }
+      } else {
+        console.log('[MediaService] Using direct storage.upload flow for video (fallback)');
+        const base64 = await FileSystem.readAsStringAsync(fileUri, { encoding: FileSystem.EncodingType.Base64 });
+        const bytes = this.base64ToUint8Array(base64);
+        const { error: upErr } = await supabase.storage
+          .from(STORAGE_BUCKETS.STORIES)
+          .upload(fileName, bytes as any, { contentType: 'video/mp4', cacheControl: '3600', upsert: false });
+        if (upErr) throw upErr;
+      }
+
+      const mediaURL = getMediaUrl(`${STORAGE_BUCKETS.STORIES}/${fileName}`, false);
+      const thumbnailURL = mediaURL;
+      return { mediaURL, thumbnailURL };
+    } catch (error) {
+      console.error('Story video path upload failed:', error);
+      throw new Error('Failed to upload story video');
+    }
+  }
+
+  /**
+   * Upload a story thumbnail (jpg blob)
+   */
+  async uploadStoryThumbnail(userId: string, blob: Blob): Promise<string> {
+    try {
+      const fileName = `${userId}/thumb_${Date.now()}.jpg`;
+      const { data, error } = await supabase.storage
+        .from(STORAGE_BUCKETS.STORIES)
+        .upload(fileName, blob, {
+          contentType: 'image/jpeg',
+          cacheControl: '3600',
+          upsert: false,
+        });
+      if (error) throw error;
+      return getMediaUrl(`${STORAGE_BUCKETS.STORIES}/${fileName}`, false);
+    } catch (error) {
+      console.error('Story thumbnail upload failed:', error);
+      throw new Error('Failed to upload story thumbnail');
+    }
   }
 
   // ==========================================
